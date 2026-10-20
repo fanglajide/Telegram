@@ -5,7 +5,10 @@
 #include <stdlib.h>
 #include <time.h>
 #include <opusfile.h>
-#include "utils.h"
+#include <math.h>
+#include "c_utils.h"
+#include "libavformat/avformat.h"
+#include "libavcodec/avcodec.h"
 
 typedef struct {
     int version;
@@ -186,9 +189,9 @@ buf[base] = (val) & 0xff; \
 
 static void comment_init(char **comments, int *length, const char *vendor_string) {
     // The 'vendor' field should be the actual encoding library used
-    int vendor_length = strlen(vendor_string);
+    size_t vendor_length = strlen(vendor_string);
     int user_comment_list_length = 0;
-    int len = 8 + 4 + vendor_length + 4;
+    size_t len = 8 + 4 + vendor_length + 4;
     char *p = (char *)malloc(len);
     memcpy(p, "OpusTags", 8);
     writeint(p, 8, vendor_length);
@@ -198,13 +201,13 @@ static void comment_init(char **comments, int *length, const char *vendor_string
     *comments = p;
 }
 
-static void comment_pad(char **comments, int* length, int amount) {
+static void comment_pad(char **comments, int* length, size_t amount) {
     if (amount > 0) {
         char *p = *comments;
         // Make sure there is at least amount worth of padding free, and round up to the maximum that fits in the current ogg segments
-        int newlen = (*length + amount + 255) / 255 * 255 - 1;
+        size_t newlen = (*length + amount + 255) / 255 * 255 - 1;
         p = realloc(p, newlen);
-        for (int i = *length; i < newlen; i++) {
+        for (int32_t i = *length; i < newlen; i++) {
             p[i] = 0;
         }
         *comments = p;
@@ -213,23 +216,25 @@ static void comment_pad(char **comments, int* length, int amount) {
 }
 
 static int writeOggPage(ogg_page *page, FILE *os) {
-    int written = fwrite(page->header, sizeof(unsigned char), page->header_len, os);
-    written += fwrite(page->body, sizeof(unsigned char), page->body_len, os);
+    int written = fwrite(page->header, sizeof(unsigned char), (size_t) page->header_len, os);
+    written += fwrite(page->body, sizeof(unsigned char), (size_t) page->body_len, os);
     return written;
 }
 
-const opus_int32 bitrate = 16000;
-const opus_int32 rate = 16000;
+const opus_int32 bitrate = OPUS_BITRATE_MAX;
 const opus_int32 frame_size = 960;
 const int with_cvbr = 1;
 const int max_ogg_delay = 0;
 const int comment_padding = 512;
 
-opus_int32 coding_rate = 16000;
+opus_int32 rate = 48000;
+opus_int32 coding_rate = 48000;
+
 ogg_int32_t _packetId;
 OpusEncoder *_encoder = 0;
 uint8_t *_packet = 0;
 ogg_stream_state os;
+const char *_filePath;
 FILE *_fileOs = 0;
 oe_enc_opt inopt;
 OpusHeader header;
@@ -244,10 +249,17 @@ ogg_int64_t enc_granulepos;
 ogg_int64_t last_granulepos;
 int size_segments;
 int last_segments;
+int serialno;
 
 void cleanupRecorder() {
-    
-    ogg_stream_flush(&os, &og);
+
+    if (_fileOs) {
+        while (ogg_stream_flush(&os, &og)) {
+            writeOggPage(&og, _fileOs);
+        }
+    } else {
+        ogg_stream_flush(&os, &og);
+    }
     
     if (_encoder) {
         opus_encoder_destroy(_encoder);
@@ -274,6 +286,10 @@ void cleanupRecorder() {
     size_segments = 0;
     last_segments = 0;
     last_granulepos = 0;
+    if (_filePath) {
+        free(_filePath);
+        _filePath = 0;
+    }
     memset(&os, 0, sizeof(ogg_stream_state));
     memset(&inopt, 0, sizeof(oe_enc_opt));
     memset(&header, 0, sizeof(OpusHeader));
@@ -281,15 +297,24 @@ void cleanupRecorder() {
     memset(&og, 0, sizeof(ogg_page));
 }
 
-int initRecorder(const char *path) {
+int initRecorder(const char *path, opus_int32 sampleRate) {
     cleanupRecorder();
-    
+
+    coding_rate = sampleRate;
+    rate = sampleRate;
+
     if (!path) {
+        LOGE("path is null");
         return 0;
     }
-    
-    _fileOs = fopen(path, "wb");
+
+    int length = strlen(path);
+    _filePath = (char*) malloc(length + 1);
+    strcpy(_filePath, path);
+
+    _fileOs = fopen(path, "w");
     if (!_fileOs) {
+        LOGE("error cannot open file: %s", path);
         return 0;
     }
     
@@ -297,25 +322,13 @@ int initRecorder(const char *path) {
     inopt.gain = 0;
     inopt.endianness = 0;
     inopt.copy_comments = 0;
-    inopt.rawmode = 1;
-    inopt.ignorelength = 1;
+    inopt.rawmode = 0;
+    inopt.ignorelength = 0;
     inopt.samplesize = 16;
     inopt.channels = 1;
     inopt.skip = 0;
     
     comment_init(&inopt.comments, &inopt.comments_length, opus_get_version_string());
-    
-    if (rate > 24000) {
-        coding_rate = 48000;
-    } else if (rate > 16000) {
-        coding_rate = 24000;
-    } else if (rate > 12000) {
-        coding_rate = 16000;
-    } else if (rate > 8000) {
-        coding_rate = 12000;
-    } else {
-        coding_rate = 8000;
-    }
     
     if (rate != coding_rate) {
         LOGE("Invalid rate");
@@ -329,7 +342,7 @@ int initRecorder(const char *path) {
     header.nb_streams = 1;
     
     int result = OPUS_OK;
-    _encoder = opus_encoder_create(coding_rate, 1, OPUS_APPLICATION_AUDIO, &result);
+    _encoder = opus_encoder_create(coding_rate, 1, OPUS_APPLICATION_VOIP, &result);
     if (result != OPUS_OK) {
         LOGE("Error cannot create encoder: %s", opus_strerror(result));
         return 0;
@@ -339,13 +352,14 @@ int initRecorder(const char *path) {
     _packet = malloc(max_frame_bytes);
     
     result = opus_encoder_ctl(_encoder, OPUS_SET_BITRATE(bitrate));
+    //result = opus_encoder_ctl(_encoder, OPUS_SET_COMPLEXITY(10));
     if (result != OPUS_OK) {
         LOGE("Error OPUS_SET_BITRATE returned: %s", opus_strerror(result));
         return 0;
     }
     
 #ifdef OPUS_SET_LSB_DEPTH
-    result = opus_encoder_ctl(_encoder, OPUS_SET_LSB_DEPTH(max(8, min(24, inopt.samplesize))));
+    result = opus_encoder_ctl(_encoder, OPUS_SET_LSB_DEPTH(MAX(8, MIN(24, inopt.samplesize))));
     if (result != OPUS_OK) {
         LOGE("Warning OPUS_SET_LSB_DEPTH returned: %s", opus_strerror(result));
     }
@@ -362,7 +376,7 @@ int initRecorder(const char *path) {
     header.preskip = (int)(inopt.skip * (48000.0 / coding_rate));
     inopt.extraout = (int)(header.preskip * (rate / 48000.0));
     
-    if (ogg_stream_init(&os, rand()) == -1) {
+    if (ogg_stream_init(&os, serialno = rand()) == -1) {
         LOGE("Error: stream init failed");
         return 0;
     }
@@ -420,24 +434,20 @@ int initRecorder(const char *path) {
     return 1;
 }
 
-int writeFrame(uint8_t *framePcmBytes, unsigned int frameByteCount) {
-    int cur_frame_size = frame_size;
+int writeFrame(uint8_t *framePcmBytes, uint32_t frameByteCount, int end) {
+    size_t cur_frame_size = frame_size;
     _packetId++;
     
     opus_int32 nb_samples = frameByteCount / 2;
     total_samples += nb_samples;
-    if (nb_samples < frame_size) {
-        op.e_o_s = 1;
-    } else {
-        op.e_o_s = 0;
-    }
+    op.e_o_s = end;
     
     int nbBytes = 0;
     
     if (nb_samples != 0) {
         uint8_t *paddedFrameBytes = framePcmBytes;
         int freePaddedFrameBytes = 0;
-        
+
         if (nb_samples < cur_frame_size) {
             paddedFrameBytes = malloc(cur_frame_size * 2);
             freePaddedFrameBytes = 1;
@@ -448,7 +458,6 @@ int writeFrame(uint8_t *framePcmBytes, unsigned int frameByteCount) {
         nbBytes = opus_encode(_encoder, (opus_int16 *)paddedFrameBytes, cur_frame_size, _packet, max_frame_bytes / 10);
         if (freePaddedFrameBytes) {
             free(paddedFrameBytes);
-            paddedFrameBytes = NULL;
         }
         
         if (nbBytes < 0) {
@@ -458,7 +467,7 @@ int writeFrame(uint8_t *framePcmBytes, unsigned int frameByteCount) {
         
         enc_granulepos += cur_frame_size * 48000 / coding_rate;
         size_segments = (nbBytes + 255) / 255;
-        min_bytes = min(nbBytes, min_bytes);
+        min_bytes = MIN(nbBytes, min_bytes);
     }
     
     while ((((size_segments <= 255) && (last_segments + size_segments > 255)) || (enc_granulepos - last_granulepos > max_ogg_delay)) && ogg_stream_flush_fill(&os, &og, 255 * 255)) {
@@ -476,7 +485,7 @@ int writeFrame(uint8_t *framePcmBytes, unsigned int frameByteCount) {
         pages_out++;
     }
     
-    op.packet = (unsigned char *)_packet;
+    op.packet = _packet;
     op.bytes = nbBytes;
     op.b_o_s = 0;
     op.granulepos = enc_granulepos;
@@ -504,162 +513,37 @@ int writeFrame(uint8_t *framePcmBytes, unsigned int frameByteCount) {
     return 1;
 }
 
-JNIEXPORT int Java_org_telegram_android_MediaController_startRecord(JNIEnv *env, jclass class, jstring path) {
+JNIEXPORT jint Java_org_telegram_messenger_MediaController_startRecord(JNIEnv *env, jclass class, jstring path, jint sampleRate) {
     const char *pathStr = (*env)->GetStringUTFChars(env, path, 0);
-    
-    int result = initRecorder(pathStr);
-    
+
+    int32_t result = initRecorder(pathStr, sampleRate);
+
     if (pathStr != 0) {
         (*env)->ReleaseStringUTFChars(env, path, pathStr);
     }
-    
+
     return result;
 }
 
-JNIEXPORT int Java_org_telegram_android_MediaController_writeFrame(JNIEnv *env, jclass class, jobject frame, jint len) {
+JNIEXPORT jint Java_org_telegram_messenger_MediaController_writeFrame(JNIEnv *env, jclass class, jobject frame, jint len) {
     jbyte *frameBytes = (*env)->GetDirectBufferAddress(env, frame);
-    return writeFrame(frameBytes, len);
+    return writeFrame((uint8_t *) frameBytes, (uint32_t) len, len / 2 < frame_size);
 }
 
-JNIEXPORT void Java_org_telegram_android_MediaController_stopRecord(JNIEnv *env, jclass class) {
+JNIEXPORT void Java_org_telegram_messenger_MediaController_stopRecord(JNIEnv *env, jclass class) {
     cleanupRecorder();
 }
 
-//player
-OggOpusFile *_opusFile;
-int _isSeekable = 0;
-int64_t _totalPcmDuration = 0;
-int64_t _currentPcmOffset = 0;
-int _finished = 0;
-static const int playerBuffersCount = 3;
-static const int playerSampleRate = 48000;
-
-void cleanupPlayer() {
-    if (_opusFile) {
-        op_free(_opusFile);
-        _opusFile = 0;
-    }
-    _isSeekable = 0;
-    _totalPcmDuration = 0;
-    _currentPcmOffset = 0;
-    _finished = 0;
-}
-
-int seekPlayer(float position) {
-    if (!_opusFile || !_isSeekable || position < 0) {
-        return 0;
-    }
-    int result = op_pcm_seek(_opusFile, (ogg_int64_t)(position * _totalPcmDuration));
-    if (result != OPUS_OK) {
-        LOGE("op_pcm_seek failed: %d", result);
-    }
-    ogg_int64_t pcmPosition = op_pcm_tell(_opusFile);
-    _currentPcmOffset = pcmPosition;
-    return result == OPUS_OK;
-}
-
-int initPlayer(const char *path) {
-    cleanupPlayer();
-    
-    int openError = OPUS_OK;
-    _opusFile = op_open_file(path, &openError);
-    if (!_opusFile || openError != OPUS_OK) {
-        LOGE("op_open_file failed: %d", openError);
-        cleanupPlayer();
-        return 0;
-    }
-    
-    _isSeekable = op_seekable(_opusFile);
-    _totalPcmDuration = op_pcm_total(_opusFile, -1);
-        
-    return 1;
-}
-
-void fillBuffer(uint8_t *buffer, int capacity, int *args) {
-    if (_opusFile) {
-        args[1] = max(0, op_pcm_tell(_opusFile));
-        
-        if (_finished) {
-            args[0] = 0;
-            args[1] = 0;
-            args[2] = 1;
-            return;
-        } else {
-            int writtenOutputBytes = 0;
-            int endOfFileReached = 0;
-            
-            while (writtenOutputBytes < capacity) {
-                int readSamples = op_read(_opusFile, (opus_int16 *)(buffer + writtenOutputBytes), (capacity - writtenOutputBytes) / 2, NULL);
-                
-                if (readSamples > 0) {
-                    writtenOutputBytes += readSamples * 2;
-                } else {
-                    if (readSamples < 0) {
-                        LOGE("op_read failed: %d", readSamples);
-                    }
-                    endOfFileReached = 1;
-                    break;
-                }
-            }
-            
-            args[0] = writtenOutputBytes;
-            
-            if (endOfFileReached || args[1] + args[0] == _totalPcmDuration) {
-                _finished = 1;
-                args[2] = 1;
-            } else {
-                args[2] = 0;
-            }
-        }
-    } else {
-        memset(buffer, 0, capacity);
-        args[0] = capacity;
-        args[1] = _totalPcmDuration;
-    }
-}
-
-JNIEXPORT jlong Java_org_telegram_android_MediaController_getTotalPcmDuration(JNIEnv *env, jclass class) {
-    return _totalPcmDuration;
-}
-
-JNIEXPORT void Java_org_telegram_android_MediaController_readOpusFile(JNIEnv *env, jclass class, jobject buffer, jint capacity, jintArray args) {
-    jint *argsArr = (*env)->GetIntArrayElements(env, args, 0);
-    jbyte *bufferBytes = (*env)->GetDirectBufferAddress(env, buffer);
-    fillBuffer(bufferBytes, capacity, argsArr);
-    (*env)->ReleaseIntArrayElements(env, args, argsArr, 0);
-}
-
-JNIEXPORT int Java_org_telegram_android_MediaController_seekOpusFile(JNIEnv *env, jclass class, jfloat position) {
-    return seekPlayer(position);
-}
-
-JNIEXPORT int Java_org_telegram_android_MediaController_openOpusFile(JNIEnv *env, jclass class, jstring path) {
+JNIEXPORT jint Java_org_telegram_messenger_MediaController_isOpusFile(JNIEnv *env, jclass class, jstring path) {
     const char *pathStr = (*env)->GetStringUTFChars(env, path, 0);
     
-    int result = initPlayer(pathStr);
+    int32_t result = 0;
     
-    if (pathStr != 0) {
-        (*env)->ReleaseStringUTFChars(env, path, pathStr);
-    }
-    
-    return result;
-}
-
-JNIEXPORT void Java_org_telegram_android_MediaController_closeOpusFile(JNIEnv *env, jclass class) {
-    cleanupPlayer();
-}
-
-JNIEXPORT int Java_org_telegram_android_MediaController_isOpusFile(JNIEnv *env, jclass class, jstring path) {
-    const char *pathStr = (*env)->GetStringUTFChars(env, path, 0);
-    
-    int result = 0;
-    
-    int error = OPUS_OK;
+    int32_t error = OPUS_OK;
     OggOpusFile *file = op_test_file(pathStr, &error);
     if (file != NULL) {
-        int error = op_test_open(file);
+        error = op_test_open(file);
         op_free(file);
-        
         result = error == OPUS_OK;
     }
     
@@ -668,4 +552,576 @@ JNIEXPORT int Java_org_telegram_android_MediaController_isOpusFile(JNIEnv *env, 
     }
     
     return result;
+}
+
+static inline void set_bits(uint8_t *bytes, int32_t bitOffset, int32_t value) {
+    bytes += bitOffset / 8;
+    bitOffset %= 8;
+
+    uint16_t bits = (uint16_t) (value << bitOffset);
+    bytes[0] |= (uint8_t) bits;
+    bytes[1] |= (uint8_t) (bits >> 8);
+}
+
+JNIEXPORT jbyteArray Java_org_telegram_messenger_MediaController_getWaveform2(JNIEnv *env, jclass class, jshortArray array, jint length) {
+
+    jshort *sampleBuffer = (*env)->GetShortArrayElements(env, array, 0);
+    if (sampleBuffer == NULL) {
+        return NULL;
+    }
+
+    const int32_t resultSamples = 100;
+    uint16_t *samples = calloc(resultSamples, sizeof(uint16_t));
+    if (samples == NULL) {
+        (*env)->ReleaseShortArrayElements(env, array, sampleBuffer, JNI_ABORT);
+        return NULL;
+    }
+    uint64_t sampleIndex = 0;
+    uint16_t peakSample = 0;
+    int32_t sampleRate = (int32_t) MAX(1, length / resultSamples);
+    int32_t index = 0;
+
+    for (int32_t i = 0; i < length; i++) {
+        uint16_t sample = (uint16_t) abs(sampleBuffer[i]);
+        if (sample > peakSample) {
+            peakSample = sample;
+        }
+        if (sampleIndex++ % sampleRate == 0) {
+            if (index < resultSamples) {
+                samples[index++] = peakSample;
+            }
+            peakSample = 0;
+        }
+    }
+
+    int64_t sumSamples = 0;
+    for (int32_t i = 0; i < resultSamples; i++) {
+        sumSamples += samples[i];
+    }
+    uint16_t peak = (uint16_t) (sumSamples * 1.8f / resultSamples);
+    if (peak < 2500) {
+        peak = 2500;
+    }
+
+    for (int32_t i = 0; i < resultSamples; i++) {
+        uint16_t sample = (uint16_t) ((int64_t) samples[i]);
+        if (sample > peak) {
+            samples[i] = peak;
+        }
+    }
+
+    (*env)->ReleaseShortArrayElements(env, array, sampleBuffer, JNI_ABORT);
+
+    uint32_t bitstreamLength = resultSamples * 5 / 8 + 1;
+    jbyteArray result = (*env)->NewByteArray(env, bitstreamLength);
+    if (result) {
+        uint8_t *bytes = calloc(bitstreamLength + 4, 1);
+        if (bytes != NULL) {
+            for (int32_t i = 0; i < resultSamples; i++) {
+                int32_t value = MIN(31, abs((int32_t) samples[i]) * 31 / peak);
+                set_bits(bytes, i * 5, value & 31);
+            }
+            (*env)->SetByteArrayRegion(env, result, 0, bitstreamLength, (jbyte *) bytes);
+            free(bytes);
+        } else {
+            result = NULL;
+        }
+    }
+    free(samples);
+    
+    return result;
+}
+
+int16_t *sampleBuffer = NULL;
+
+JNIEXPORT jbyteArray Java_org_telegram_messenger_MediaController_getWaveform(JNIEnv *env, jclass class, jstring path) {
+    const char *pathStr = (*env)->GetStringUTFChars(env, path, 0);
+    if (pathStr == NULL) {
+        return NULL;
+    }
+    jbyteArray result = 0;
+    
+    int error = OPUS_OK;
+    OggOpusFile *opusFile = op_open_file(pathStr, &error);
+    if (opusFile != NULL && error == OPUS_OK) {
+        int64_t totalSamples = op_pcm_total(opusFile, -1);
+        const uint32_t resultSamples = 100;
+        int32_t sampleRate = MAX(1, (int32_t) (totalSamples / resultSamples));
+
+        uint16_t *samples = calloc(resultSamples, sizeof(uint16_t));
+
+        size_t bufferSize = 1024 * 128;
+        if (sampleBuffer == NULL) {
+            sampleBuffer = malloc(bufferSize);
+        }
+
+        if (samples != NULL && sampleBuffer != NULL) {
+            uint64_t sampleIndex = 0;
+            uint16_t peakSample = 0;
+
+            int32_t index = 0;
+            int decodeFailed = 0;
+
+            while (1) {
+                int readSamples = op_read(opusFile, sampleBuffer, bufferSize / 2, NULL);
+                if (readSamples < 0) {
+                    LOGE("getWaveform: op_read failed: %d", readSamples);
+                    decodeFailed = 1;
+                    break;
+                }
+                if (readSamples == 0) {
+                    break;
+                }
+                for (int32_t i = 0; i < readSamples; i++) {
+                    uint16_t sample = (uint16_t) abs(sampleBuffer[i]);
+                    if (sample > peakSample) {
+                        peakSample = sample;
+                    }
+                    if (sampleIndex++ % sampleRate == 0) {
+                        if (index < resultSamples) {
+                            samples[index++] = peakSample;
+                        }
+                        peakSample = 0;
+                    }
+                }
+            }
+
+            if (!decodeFailed) {
+                int64_t sumSamples = 0;
+                for (int32_t i = 0; i < resultSamples; i++) {
+                    sumSamples += samples[i];
+                }
+                uint16_t peak = (uint16_t) (sumSamples * 1.8f / resultSamples);
+                if (peak < 2500) {
+                    peak = 2500;
+                }
+
+                for (int32_t i = 0; i < resultSamples; i++) {
+                    uint16_t sample = (uint16_t) ((int64_t) samples[i]);
+                    if (sample > peak) {
+                        samples[i] = peak;
+                    }
+                }
+
+                uint32_t bitstreamLength = (resultSamples * 5) / 8 + 1;
+                result = (*env)->NewByteArray(env, bitstreamLength);
+                if (result) {
+                    uint8_t *bytes = calloc(bitstreamLength + 4, 1);
+                    if (bytes != NULL) {
+                        for (int32_t i = 0; i < resultSamples; i++) {
+                            int32_t value = MIN(31, abs((int32_t) samples[i]) * 31 / peak);
+                            set_bits(bytes, i * 5, value & 31);
+                        }
+
+                        (*env)->SetByteArrayRegion(env, result, 0, bitstreamLength, (jbyte *) bytes);
+                        free(bytes);
+                    } else {
+                        result = NULL;
+                    }
+                }
+            }
+        }
+
+        free(samples);
+        op_free(opusFile);
+    }
+
+    (*env)->ReleaseStringUTFChars(env, path, pathStr);
+    return result;
+}
+
+JNIEXPORT void JNICALL Java_org_telegram_ui_Stories_recorder_FfmpegAudioWaveformLoader_init(JNIEnv *env, jobject obj, jstring pathJStr, jint count) {
+    const char *path = (*env)->GetStringUTFChars(env, pathJStr, 0);
+    if (path == NULL) {
+        return;
+    }
+    if (count <= 0) {
+        (*env)->ReleaseStringUTFChars(env, pathJStr, path);
+        return;
+    }
+
+    AVFormatContext *formatContext = avformat_alloc_context();
+    if (!formatContext) {
+        (*env)->ReleaseStringUTFChars(env, pathJStr, path);
+        return;
+    }
+
+    int res;
+    if ((res = avformat_open_input(&formatContext, path, NULL, NULL)) != 0) {
+        LOGD("avformat_open_input error %s", av_err2str(res));
+        avformat_free_context(formatContext);
+        (*env)->ReleaseStringUTFChars(env, pathJStr, path);
+        return;
+    }
+
+    if (avformat_find_stream_info(formatContext, NULL) < 0) {
+        avformat_close_input(&formatContext);
+        (*env)->ReleaseStringUTFChars(env, pathJStr, path);
+        return;
+    }
+
+    AVCodec *codec = NULL;
+    int audioStreamIndex = av_find_best_stream(formatContext, AVMEDIA_TYPE_AUDIO, -1, -1, &codec, 0);
+    if (audioStreamIndex < 0 || codec == NULL) {
+        LOGD("av_find_best_stream error %s", av_err2str(audioStreamIndex));
+        avformat_close_input(&formatContext);
+        (*env)->ReleaseStringUTFChars(env, pathJStr, path);
+        return;
+    }
+
+    AVCodecContext *codecContext = avcodec_alloc_context3(codec);
+    if (codecContext == NULL) {
+        avformat_close_input(&formatContext);
+        (*env)->ReleaseStringUTFChars(env, pathJStr, path);
+        return;
+    }
+    if (avcodec_parameters_to_context(codecContext, formatContext->streams[audioStreamIndex]->codecpar) < 0) {
+        avcodec_free_context(&codecContext);
+        avformat_close_input(&formatContext);
+        (*env)->ReleaseStringUTFChars(env, pathJStr, path);
+        return;
+    }
+
+    int64_t duration_in_microseconds = formatContext->duration;
+    double duration_in_seconds = (double)duration_in_microseconds / AV_TIME_BASE;
+
+    if (avcodec_open2(codecContext, codec, NULL) < 0) {
+        avcodec_free_context(&codecContext);
+        avformat_close_input(&formatContext);
+        (*env)->ReleaseStringUTFChars(env, pathJStr, path);
+        return;
+    }
+
+    jclass cls = (*env)->GetObjectClass(env, obj);
+    jmethodID mid = (*env)->GetMethodID(env, cls, "receiveChunk", "([SI)V");
+
+    AVFrame *frame = av_frame_alloc();
+    if (frame == NULL) {
+        avcodec_free_context(&codecContext);
+        avformat_close_input(&formatContext);
+        (*env)->ReleaseStringUTFChars(env, pathJStr, path);
+        return;
+    }
+    AVPacket packet;
+
+    int sampleRate = codecContext->sample_rate;
+    int skip = 4;
+    int barWidth = (int) round((double) duration_in_seconds * sampleRate / count / (1 + skip));
+
+    int channels = codecContext->ch_layout.nb_channels;
+    if (channels <= 0) {
+        av_frame_free(&frame);
+        avcodec_free_context(&codecContext);
+        avformat_close_input(&formatContext);
+        (*env)->ReleaseStringUTFChars(env, pathJStr, path);
+        return;
+    }
+
+    short peak = 0;
+    int currentCount = 0;
+    int index = 0;
+    int chunkIndex = 0;
+    short waveformChunkData[32] = {0};
+
+    while (av_read_frame(formatContext, &packet) >= 0) {
+        if (packet.stream_index == audioStreamIndex) {
+            int response = avcodec_send_packet(codecContext, &packet);
+
+            while (response >= 0) {
+                response = avcodec_receive_frame(codecContext, frame);
+                if (response == AVERROR(EAGAIN) || response == AVERROR_EOF) {
+                    break;
+                } else if (response < 0) {
+                    break;
+                }
+
+                const int is_planar = av_sample_fmt_is_planar(codecContext->sample_fmt);
+                const int sample_size = av_get_bytes_per_sample(codecContext->sample_fmt);
+                for (int i = 0; i < frame->nb_samples; i++) {
+                    int sum = 0;
+                    for (int channel = 0; channel < channels; channel++) {
+                        uint8_t *data;
+                        if (is_planar) {
+                            data = frame->data[channel] + i * sample_size;
+                        } else {
+                            data = frame->data[0] + (i * channels + channel) * sample_size;
+                        }
+                        short sample_value = 0;
+                        switch (codecContext->sample_fmt) {
+                            case AV_SAMPLE_FMT_S16:
+                            case AV_SAMPLE_FMT_S16P:
+                                sample_value = *(int16_t *)data;
+                                break;
+
+                            case AV_SAMPLE_FMT_FLT:
+                            case AV_SAMPLE_FMT_FLTP:
+                                sample_value = (short)(*(float *)data * 32767.0f);
+                                break;
+
+                            case AV_SAMPLE_FMT_U8:
+                            case AV_SAMPLE_FMT_U8P:
+                                sample_value = (*(uint8_t *)data - 128) * 256;
+                                break;
+
+                            default:
+                                break;
+                        }
+                        sum += sample_value;
+                    }
+                    short value = sum / channels;
+
+                    if (currentCount >= barWidth) {
+                        waveformChunkData[index - chunkIndex] = peak;
+                        index++;
+                        if (index - chunkIndex >= sizeof(waveformChunkData) / sizeof(short) || index >= count) {
+                            jshortArray waveformData = (*env)->NewShortArray(env, sizeof(waveformChunkData) / sizeof(short));
+                            if (waveformData == NULL) {
+                                break;
+                            }
+                            (*env)->SetShortArrayRegion(env, waveformData, 0, sizeof(waveformChunkData) / sizeof(short), waveformChunkData);
+                            (*env)->CallVoidMethod(env, obj, mid, waveformData, sizeof(waveformChunkData) / sizeof(short));
+
+                            memset(waveformChunkData, 0, sizeof(waveformChunkData));
+                            chunkIndex = index;
+
+                            (*env)->DeleteLocalRef(env, waveformData);
+                        }
+                        peak = 0;
+                        currentCount = 0;
+                        if (index >= count) {
+                            break;
+                        }
+                    }
+
+                    if (peak < value) {
+                        peak = value;
+                    }
+                    currentCount++;
+
+                    i += skip;
+                    if (i >= frame->nb_samples) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        av_packet_unref(&packet);
+
+        if (index >= count) {
+            break;
+        }
+
+        jfieldID fid = (*env)->GetFieldID(env, cls, "running", "Z");
+        jboolean running = (*env)->GetBooleanField(env, obj, fid);
+        if (running == JNI_FALSE) {
+            break;
+        }
+    }
+
+    av_frame_free(&frame);
+    avcodec_free_context(&codecContext);
+    avformat_close_input(&formatContext);
+
+    (*env)->ReleaseStringUTFChars(env, pathJStr, path);
+}
+
+int cropOpusAudio(const char *inputPath, const char *outputPath, float startTimeMs, float endTimeMs) {
+    int error;
+    OggOpusFile *opusFile = op_open_file(inputPath, &error);
+    if (!opusFile || error != OPUS_OK) {
+        LOGE("Failed to open input opus file: %s", opus_strerror(error));
+        return 0;
+    }
+
+    const OpusHead *head = op_head(opusFile, -1);
+    if (!head) {
+        LOGE("Failed to read Opus header");
+        op_free(opusFile);
+        return 0;
+    }
+
+    int channels = head->channel_count;
+    opus_int64 total_source_samples = op_pcm_total(opusFile, -1);
+    if (total_source_samples < 0) {
+        LOGE("Failed to get source sample count: %lld", (long long) total_source_samples);
+        op_free(opusFile);
+        return 0;
+    }
+
+    opus_int32 rate = 48000;
+
+    opus_int64 start_sample = MAX(0, MIN(total_source_samples, (opus_int64) ((startTimeMs / 1000.0) * rate)));
+    opus_int64 end_sample = MAX(0, MIN(total_source_samples, (opus_int64) ((endTimeMs / 1000.0) * rate)));
+    opus_int64 crop_length = end_sample - start_sample;
+
+    if (start_sample >= total_source_samples || end_sample > total_source_samples || start_sample >= end_sample) {
+        LOGE("Invalid crop range");
+        op_free(opusFile);
+        return 0;
+    }
+
+    if (op_pcm_seek(opusFile, start_sample) != 0) {
+        LOGE("Failed to seek to start sample");
+        op_free(opusFile);
+        return 0;
+    }
+
+    if (!initRecorder(outputPath, rate)) {
+        LOGE("Failed to init recorder");
+        op_free(opusFile);
+        return 0;
+    }
+
+    int16_t *buffer = malloc(sizeof(int16_t) * frame_size * channels);
+    if (!buffer) {
+        LOGE("Out of memory");
+        cleanupRecorder();
+        op_free(opusFile);
+        return 0;
+    }
+
+    int success = 1;
+    opus_int64 remaining_samples = crop_length;
+    while (remaining_samples > 0) {
+        int max_samples = (int) MIN(960, remaining_samples / channels);
+        if (max_samples <= 0) {
+            break;
+        }
+        int samples_read = op_read(opusFile, buffer, max_samples * channels, NULL);
+        if (samples_read < 0) {
+            LOGE("Decoding error from op_read(): %d", samples_read);
+            success = 0;
+            break;
+        }
+        if (samples_read == 0) {
+            break;
+        }
+        remaining_samples -= samples_read;
+
+        int end = remaining_samples <= 0;
+
+        size_t byte_count = samples_read * sizeof(int16_t);
+        if (!writeFrame((uint8_t *)buffer, byte_count, end)) {
+            LOGE("Failed to write frame");
+            success = 0;
+            break;
+        }
+    }
+
+    free(buffer);
+    cleanupRecorder();
+    op_free(opusFile);
+
+    return success;
+}
+
+int append_stream(OggOpusFile *of, int16_t* buffer, int channels, int is_last) {
+    opus_int64 total_source_samples = op_pcm_total(of, -1);
+    if (total_source_samples < 0) {
+        LOGE("Failed to get source sample count: %lld",(long long) total_source_samples);
+        return 0;
+    }
+
+    while (total_source_samples > 0) {
+        int samples_read = op_read(of, buffer, frame_size, NULL);
+        if (samples_read < 0) {
+            LOGE("Decoding error from op_read(): %d", samples_read);
+            return 0;
+        }
+        if (samples_read == 0) {
+            break;
+        }
+        total_source_samples -= samples_read;
+        size_t byte_count = (size_t) samples_read * channels * sizeof(int16_t);
+        if (!writeFrame((uint8_t*) buffer, byte_count, is_last && total_source_samples <= 0)) {
+            LOGE("Failed to write encoded frame");
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int joinOpusAudios(const char* file1, const char* file2, const char* dest) {
+    int error;
+    OggOpusFile *opusFile1 = op_open_file(file1, &error);
+    if (!opusFile1 || error != OPUS_OK) {
+        LOGE("Failed to open input opus file1: %s", opus_strerror(error));
+        return 0;
+    }
+    OggOpusFile *opusFile2 = op_open_file(file2, &error);
+    if (!opusFile2 || error != OPUS_OK) {
+        LOGE("Failed to open input opus file2: %s", opus_strerror(error));
+        if (opusFile2 != NULL) {
+            op_free(opusFile2);
+        }
+        op_free(opusFile1);
+        return 0;
+    }
+
+    const OpusHead *head1 = op_head(opusFile1, -1);
+    if (!head1) {
+        LOGE("Failed to read Opus header");
+        op_free(opusFile1);
+        op_free(opusFile2);
+        return 0;
+    }
+    const OpusHead *head2 = op_head(opusFile2, -1);
+    if (!head2) {
+        LOGE("Failed to read Opus header");
+        op_free(opusFile1);
+        op_free(opusFile2);
+        return 0;
+    }
+
+    int channels = MIN(head1->channel_count, head2->channel_count);
+    opus_int32 rate = 48000;
+
+    if (!initRecorder(dest, rate)) {
+        LOGE("Failed to init recorder");
+        op_free(opusFile1);
+        op_free(opusFile2);
+        return 0;
+    }
+
+    int16_t *buffer = malloc(sizeof(int16_t) * frame_size * channels);
+    if (!buffer) {
+        LOGE("Out of memory");
+        cleanupRecorder();
+        op_free(opusFile1);
+        op_free(opusFile2);
+        return 0;
+    }
+
+    int success = append_stream(opusFile1, buffer, channels, 0);
+    if (success) {
+        success = append_stream(opusFile2, buffer, channels, 1);
+    }
+
+    free(buffer);
+    cleanupRecorder();
+    op_free(opusFile1);
+    op_free(opusFile2);
+
+    return success;
+}
+
+JNIEXPORT jboolean Java_org_telegram_messenger_MediaController_cropOpusFile(JNIEnv *env, jclass class, jstring src, jstring dst, jlong startMs, jlong endMs) {
+    const char* srcStr = (*env)->GetStringUTFChars(env, src, 0);
+    const char* dstStr = (*env)->GetStringUTFChars(env, dst, 0);
+    int result = cropOpusAudio(srcStr, dstStr, startMs, endMs);
+    (*env)->ReleaseStringUTFChars(env, src, srcStr);
+    (*env)->ReleaseStringUTFChars(env, dst, dstStr);
+    return result == 1;
+}
+
+JNIEXPORT jboolean Java_org_telegram_messenger_MediaController_joinOpusFiles(JNIEnv* env, jclass class, jstring file1, jstring file2, jstring dest) {
+    const char* file1Str = (*env)->GetStringUTFChars(env, file1, 0);
+    const char* file2Str = (*env)->GetStringUTFChars(env, file2, 0);
+    const char* destStr = (*env)->GetStringUTFChars(env, dest, 0);
+    int result = joinOpusAudios(file1Str, file2Str, destStr);
+    (*env)->ReleaseStringUTFChars(env, file1, file1Str);
+    (*env)->ReleaseStringUTFChars(env, file2, file2Str);
+    (*env)->ReleaseStringUTFChars(env, dest, destStr);
+    return result == 1;
 }

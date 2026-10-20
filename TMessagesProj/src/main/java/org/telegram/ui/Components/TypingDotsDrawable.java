@@ -1,9 +1,9 @@
 /*
- * This is the source code of Telegram for Android v. 1.7.x.
+ * This is the source code of Telegram for Android v. 5.x.x.
  * It is licensed under GNU GPL v. 2 or later.
  * You should have received a copy of the license in this archive (see LICENSE).
  *
- * Copyright Nikolai Kudashov, 2013-2014.
+ * Copyright Nikolai Kudashov, 2013-2018.
  */
 
 package org.telegram.ui.Components;
@@ -11,24 +11,43 @@ package org.telegram.ui.Components;
 import android.graphics.Canvas;
 import android.graphics.ColorFilter;
 import android.graphics.Paint;
-import android.graphics.drawable.Drawable;
+import android.graphics.PixelFormat;
 import android.view.animation.DecelerateInterpolator;
 
-import org.telegram.android.AndroidUtilities;
+import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.NotificationCenter;
+import org.telegram.messenger.UserConfig;
+import org.telegram.ui.ActionBar.Theme;
 
-public class TypingDotsDrawable extends Drawable {
+public class TypingDotsDrawable extends StatusDrawable {
+
+    private int currentAccount = UserConfig.selectedAccount;
     private boolean isChat = false;
-    private Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private float[] scales = new float[3];
     private float[] startTimes = new float[] {0, 150, 300};
     private float[] elapsedTimes = new float[] {0, 0, 0};
     private long lastUpdateTime = 0;
     private boolean started = false;
     private DecelerateInterpolator decelerateInterpolator = new DecelerateInterpolator();
+    private boolean ignoreAnimationLocks;
 
-    public TypingDotsDrawable() {
-        super();
-        paint.setColor(0xffd7e8f7);
+    private Paint currentPaint;
+
+    public TypingDotsDrawable(boolean createPaint) {
+        if (createPaint) {
+            currentPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        }
+    }
+
+    public void setIgnoreAnimationLocks() {
+        this.ignoreAnimationLocks = true;
+    }
+
+    @Override
+    public void setColor(int color) {
+        if (currentPaint != null) {
+            currentPaint.setColor(color);
+        }
     }
 
     public void setIsChat(boolean value) {
@@ -65,7 +84,7 @@ public class TypingDotsDrawable extends Drawable {
             }
         }
 
-        invalidateSelf();
+        invalidateLimited();
     }
 
     public void start() {
@@ -87,18 +106,39 @@ public class TypingDotsDrawable extends Drawable {
 
     @Override
     public void draw(Canvas canvas) {
-        int y = 0;
+        int x = getBounds().left;
+        int y;
         if (isChat) {
-            y = AndroidUtilities.dp(6);
+            y = AndroidUtilities.dp(8.5f) + getBounds().top;
         } else {
-            y = AndroidUtilities.dp(7);
+            y = AndroidUtilities.dp(9.3f) + getBounds().top;
         }
-        canvas.drawCircle(AndroidUtilities.dp(3), y, scales[0] * AndroidUtilities.density, paint);
-        canvas.drawCircle(AndroidUtilities.dp(9), y, scales[1] * AndroidUtilities.density, paint);
-        canvas.drawCircle(AndroidUtilities.dp(15), y, scales[2] * AndroidUtilities.density, paint);
+        Paint paint;
+        if (currentPaint == null) {
+            paint = Theme.chat_statusPaint;
+            paint.setAlpha(255);
+        } else {
+            paint = currentPaint;
+        }
+
+        canvas.drawCircle(x + AndroidUtilities.dp(3), y, scales[0] * AndroidUtilities.density, paint);
+        canvas.drawCircle(x + AndroidUtilities.dp(9), y, scales[1] * AndroidUtilities.density, paint);
+        canvas.drawCircle(x + AndroidUtilities.dp(15), y, scales[2] * AndroidUtilities.density, paint);
+        checkUpdate();
+    }
+
+    private void checkUpdate() {
         if (started) {
-            update();
+            if (!NotificationCenter.getInstance(currentAccount).isAnimationInProgress() || ignoreAnimationLocks) {
+                update();
+            } else {
+                AndroidUtilities.runOnUIThread(this::checkUpdate, 100);
+            }
         }
+    }
+
+    public boolean isStarted() {
+        return started;
     }
 
     @Override
@@ -108,12 +148,14 @@ public class TypingDotsDrawable extends Drawable {
 
     @Override
     public void setColorFilter(ColorFilter cf) {
-
+        if (currentPaint != null) {
+            currentPaint.setColorFilter(cf);
+        }
     }
 
     @Override
     public int getOpacity() {
-        return 0;
+        return PixelFormat.TRANSPARENT;
     }
 
     @Override
@@ -123,6 +165,6 @@ public class TypingDotsDrawable extends Drawable {
 
     @Override
     public int getIntrinsicHeight() {
-        return AndroidUtilities.dp(10);
+        return AndroidUtilities.dp(18);
     }
 }

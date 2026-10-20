@@ -1,9 +1,9 @@
 /*
- * This is the source code of Telegram for Android v. 1.7.x.
+ * This is the source code of Telegram for Android v. 5.x.x.
  * It is licensed under GNU GPL v. 2 or later.
  * You should have received a copy of the license in this archive (see LICENSE).
  *
- * Copyright Nikolai Kudashov, 2013-2014.
+ * Copyright Nikolai Kudashov, 2013-2018.
  */
 
 package org.telegram.ui.Cells;
@@ -14,7 +14,9 @@ import android.view.Gravity;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 
-import org.telegram.android.AndroidUtilities;
+import org.telegram.messenger.AndroidUtilities;
+import org.telegram.ui.ActionBar.Theme;
+import org.telegram.ui.Components.LayoutHelper;
 
 public class TextInfoCell extends FrameLayout {
 
@@ -24,23 +26,16 @@ public class TextInfoCell extends FrameLayout {
         super(context);
 
         textView = new TextView(context);
-        textView.setTextColor(0xffa3a3a3);
+        textView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText5));
         textView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 13);
         textView.setGravity(Gravity.CENTER);
         textView.setPadding(0, AndroidUtilities.dp(19), 0, AndroidUtilities.dp(19));
-        addView(textView);
-        LayoutParams layoutParams = (LayoutParams) textView.getLayoutParams();
-        layoutParams.width = LayoutParams.WRAP_CONTENT;
-        layoutParams.height = LayoutParams.WRAP_CONTENT;
-        layoutParams.leftMargin = AndroidUtilities.dp(17);
-        layoutParams.rightMargin = AndroidUtilities.dp(17);
-        layoutParams.gravity = Gravity.CENTER;
-        textView.setLayoutParams(layoutParams);
+        addView(textView, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER, 17, 0, 17, 0));
     }
 
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-        super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED));
+        super.onMeasure(MeasureSpec.makeMeasureSpec(MeasureSpec.getSize(widthMeasureSpec), MeasureSpec.EXACTLY), MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED));
     }
 
     public void setText(String text) {

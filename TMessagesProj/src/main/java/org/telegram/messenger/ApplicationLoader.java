@@ -1,142 +1,226 @@
 /*
- * This is the source code of Telegram for Android v. 1.3.2.
+ * This is the source code of Telegram for Android v. 5.x.x.
  * It is licensed under GNU GPL v. 2 or later.
  * You should have received a copy of the license in this archive (see LICENSE).
  *
- * Copyright Nikolai Kudashov, 2013.
+ * Copyright Nikolai Kudashov, 2013-2018.
  */
 
 package org.telegram.messenger;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
-import android.app.AlarmManager;
 import android.app.Application;
-import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
-import android.content.pm.PackageManager;
 import android.content.res.Configuration;
-import android.graphics.drawable.ColorDrawable;
-import android.graphics.drawable.Drawable;
-import android.os.AsyncTask;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkInfo;
 import android.os.Build;
 import android.os.Handler;
 import android.os.PowerManager;
+import android.os.SystemClock;
+import android.telephony.TelephonyManager;
+import android.view.ViewGroup;
+
+import androidx.annotation.NonNull;
 
 import com.google.android.gms.common.ConnectionResult;
 import com.google.android.gms.common.GooglePlayServicesUtil;
-import com.google.android.gms.gcm.GoogleCloudMessaging;
 
-import org.telegram.android.AndroidUtilities;
-import org.telegram.android.ContactsController;
-import org.telegram.android.MediaController;
-import org.telegram.android.NotificationsService;
-import org.telegram.android.SendMessagesHelper;
-import org.telegram.android.LocaleController;
-import org.telegram.android.MessagesController;
-import org.telegram.android.NativeLoader;
-import org.telegram.android.ScreenReceiver;
+import org.json.JSONObject;
+import org.telegram.messenger.utils.Choreographer60FpsContent;
+import org.telegram.messenger.voip.VideoCapturerDevice;
+import org.telegram.tgnet.ConnectionsManager;
+import org.telegram.tgnet.TLRPC;
+import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.Components.ForegroundDetector;
+import org.telegram.ui.Components.ItemOptions;
+import org.telegram.ui.IUpdateLayout;
+import org.telegram.ui.LauncherIconController;
 
 import java.io.File;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.Locale;
 
 public class ApplicationLoader extends Application {
 
-    private GoogleCloudMessaging gcm;
-    private AtomicInteger msgId = new AtomicInteger();
-    private String regid;
-    public static final String EXTRA_MESSAGE = "message";
-    public static final String PROPERTY_REG_ID = "registration_id";
-    private static final String PROPERTY_APP_VERSION = "appVersion";
-    private static final int PLAY_SERVICES_RESOLUTION_REQUEST = 9000;
-    private static Drawable cachedWallpaper;
-    private static int selectedColor;
-    private static boolean isCustomTheme;
-    private static final Object sync = new Object();
+    public static ApplicationLoader applicationLoaderInstance;
 
+    @SuppressLint("StaticFieldLeak")
     public static volatile Context applicationContext;
+    public static volatile NetworkInfo currentNetworkInfo;
     public static volatile Handler applicationHandler;
+
+    private static ConnectivityManager connectivityManager;
     private static volatile boolean applicationInited = false;
+    private static volatile  ConnectivityManager.NetworkCallback networkCallback;
+    private static long lastNetworkCheckTypeTime;
+    private static int lastKnownNetworkType = -1;
+
+    public static long startTime;
 
     public static volatile boolean isScreenOn = false;
     public static volatile boolean mainInterfacePaused = true;
+    public static volatile boolean mainInterfaceStopped = true;
+    public static volatile boolean externalInterfacePaused = true;
+    public static volatile boolean mainInterfacePausedStageQueue = true;
+    public static boolean canDrawOverlays;
+    public static volatile long mainInterfacePausedStageQueueTime;
 
-    public static boolean isCustomTheme() {
-        return isCustomTheme;
+    private static PushListenerController.IPushListenerServiceProvider pushProvider;
+    private static IMapsProvider mapsProvider;
+    private static ILocationServiceProvider locationServiceProvider;
+
+    @Override
+    protected void attachBaseContext(Context base) {
+        super.attachBaseContext(base);
     }
 
-    public static int getSelectedColor() {
-        return selectedColor;
-    }
-
-    public static void reloadWallpaper() {
-        cachedWallpaper = null;
-        loadWallpaper();
-    }
-
-    public static void loadWallpaper() {
-        if (cachedWallpaper != null) {
-            return;
+    public static ILocationServiceProvider getLocationServiceProvider() {
+        if (locationServiceProvider == null) {
+            locationServiceProvider = applicationLoaderInstance.onCreateLocationServiceProvider();
+            locationServiceProvider.init(applicationContext);
         }
-        Utilities.searchQueue.postRunnable(new Runnable() {
-            @Override
-            public void run() {
-                synchronized (sync) {
-                    int selectedColor = 0;
-                    try {
-                        SharedPreferences preferences = ApplicationLoader.applicationContext.getSharedPreferences("mainconfig", Activity.MODE_PRIVATE);
-                        int selectedBackground = preferences.getInt("selectedBackground", 1000001);
-                        selectedColor = preferences.getInt("selectedColor", 0);
-                        int cacheColorHint = 0;
-                        if (selectedColor == 0) {
-                            if (selectedBackground == 1000001) {
-                                cachedWallpaper = applicationContext.getResources().getDrawable(R.drawable.background_hd);
-                                isCustomTheme = false;
-                            } else {
-                                File toFile = new File(ApplicationLoader.applicationContext.getFilesDir(), "wallpaper.jpg");
-                                if (toFile.exists()) {
-                                    cachedWallpaper = Drawable.createFromPath(toFile.getAbsolutePath());
-                                    isCustomTheme = true;
-                                } else {
-                                    cachedWallpaper = applicationContext.getResources().getDrawable(R.drawable.background_hd);
-                                    isCustomTheme = false;
-                                }
-                            }
-                        }
-                    } catch (Throwable throwable) {
-                        //ignore
-                    }
-                    if (cachedWallpaper == null) {
-                        if (selectedColor == 0) {
-                            selectedColor = -2693905;
-                        }
-                        cachedWallpaper = new ColorDrawable(selectedColor);
-                    }
-                }
+        return locationServiceProvider;
+    }
+
+    protected ILocationServiceProvider onCreateLocationServiceProvider() {
+        return new GoogleLocationProvider();
+    }
+
+    public static IMapsProvider getMapsProvider() {
+        if (mapsProvider == null) {
+            mapsProvider = applicationLoaderInstance.onCreateMapsProvider();
+        }
+        return mapsProvider;
+    }
+
+    protected IMapsProvider onCreateMapsProvider() {
+        return new GoogleMapsProvider();
+    }
+
+    public static PushListenerController.IPushListenerServiceProvider getPushProvider() {
+        if (pushProvider == null) {
+            pushProvider = applicationLoaderInstance.onCreatePushProvider();
+        }
+        return pushProvider;
+    }
+
+    protected PushListenerController.IPushListenerServiceProvider onCreatePushProvider() {
+        return PushListenerController.GooglePushListenerServiceProvider.INSTANCE;
+    }
+
+    public static String getApplicationId() {
+        return applicationLoaderInstance.onGetApplicationId();
+    }
+
+    protected String onGetApplicationId() {
+        return null;
+    }
+
+    public static boolean isHuaweiStoreBuild() {
+        return applicationLoaderInstance.isHuaweiBuild();
+    }
+
+    public static boolean isStandaloneBuild() {
+        return applicationLoaderInstance.isStandalone();
+    }
+
+    public static boolean isBetaBuild() {
+        return applicationLoaderInstance.isBeta();
+    }
+
+    public static boolean isAndroidTestEnvironment() {
+        return applicationLoaderInstance.isAndroidTestEnv();
+    }
+
+    protected boolean isHuaweiBuild() {
+        return false;
+    }
+
+    protected boolean isStandalone() {
+        return false;
+    }
+
+    protected boolean isBeta() {
+        return false;
+    }
+
+    protected boolean isAndroidTestEnv() {
+        return false;
+    }
+
+    public static File getFilesDirFixed() {
+        for (int a = 0; a < 10; a++) {
+            File path = ApplicationLoader.applicationContext.getFilesDir();
+            if (path != null) {
+                return path;
             }
-        });
+        }
+        try {
+            ApplicationInfo info = applicationContext.getApplicationInfo();
+            File path = new File(info.dataDir, "files");
+            path.mkdirs();
+            return path;
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
+        return new File("/data/data/org.telegram.messenger/files");
     }
 
-    public static Drawable getCachedWallpaper() {
-        synchronized (sync) {
-            return cachedWallpaper;
+    public static File getFilesDirFixed(String child) {
+        try {
+            File path = getFilesDirFixed();
+            File dir = new File(path, child);
+            dir.mkdirs();
+
+            return dir;
+        } catch (Exception e) {
+            FileLog.e(e);
         }
+        return null;
     }
 
     public static void postInitApplication() {
-        if (applicationInited) {
+        if (applicationInited || applicationContext == null) {
             return;
         }
-
         applicationInited = true;
+        NativeLoader.initNativeLibs(ApplicationLoader.applicationContext);
 
         try {
-            LocaleController.getInstance();
+            LocaleController.getInstance(); //TODO improve
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        try {
+            connectivityManager = (ConnectivityManager) ApplicationLoader.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE);
+            BroadcastReceiver networkStateReceiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
+                    try {
+                        currentNetworkInfo = connectivityManager.getActiveNetworkInfo();
+                    } catch (Throwable ignore) {
+
+                    }
+
+                    boolean isSlow = isConnectionSlow();
+                    for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
+                        ConnectionsManager.getInstance(a).checkConnection();
+                        FileLoader.getInstance(a).onNetworkChanged(isSlow);
+                    }
+                }
+            };
+            IntentFilter filter = new IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION);
+            ApplicationLoader.applicationContext.registerReceiver(networkStateReceiver, filter);
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -151,78 +235,152 @@ public class ApplicationLoader extends Application {
         }
 
         try {
-            PowerManager pm = (PowerManager)ApplicationLoader.applicationContext.getSystemService(Context.POWER_SERVICE);
+            PowerManager pm = (PowerManager) ApplicationLoader.applicationContext.getSystemService(Context.POWER_SERVICE);
             isScreenOn = pm.isScreenOn();
-            FileLog.e("tmessages", "screen state = " + isScreenOn);
+            if (BuildVars.LOGS_ENABLED) {
+                FileLog.d("screen state = " + isScreenOn);
+            }
         } catch (Exception e) {
-            FileLog.e("tmessages", e);
+            e.printStackTrace();
         }
 
-        UserConfig.loadConfig();
-        if (UserConfig.getCurrentUser() != null) {
-            MessagesController.getInstance().putUser(UserConfig.getCurrentUser(), true);
-            ConnectionsManager.getInstance().applyCountryPortNumber(UserConfig.getCurrentUser().phone);
-            ConnectionsManager.getInstance().initPushConnection();
-            MessagesController.getInstance().getBlockedUsers(true);
-            SendMessagesHelper.getInstance().checkUnsentMessages();
+        SharedConfig.loadConfig();
+        SharedPrefsHelper.init(applicationContext);
+        for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) { //TODO improve account
+            UserConfig.getInstance(a).loadConfig();
+            MessagesController.getInstance(a);
+            if (a == 0) {
+                SharedConfig.pushStringStatus = "__FIREBASE_GENERATING_SINCE_" + ConnectionsManager.getInstance(a).getCurrentTime() + "__";
+            } else {
+                ConnectionsManager.getInstance(a);
+            }
+            TLRPC.User user = UserConfig.getInstance(a).getCurrentUser();
+            if (user != null) {
+                MessagesController.getInstance(a).putUser(user, true);
+                SendMessagesHelper.getInstance(a).checkUnsentMessages();
+            }
         }
 
-        ApplicationLoader app = (ApplicationLoader)ApplicationLoader.applicationContext;
-        app.initPlayServices();
-        FileLog.e("tmessages", "app initied");
+        ApplicationLoader app = (ApplicationLoader) ApplicationLoader.applicationContext;
+        app.initPushServices();
+        if (BuildVars.LOGS_ENABLED) {
+            FileLog.d("app initied");
+        }
 
-        ContactsController.getInstance().checkAppAccount();
         MediaController.getInstance();
+        for (int a = 0; a < UserConfig.MAX_ACCOUNT_COUNT; a++) { //TODO improve account
+            ContactsController.getInstance(a).checkAppAccount();
+            DownloadController.getInstance(a);
+        }
+        BillingController.getInstance().startConnection();
+    }
+
+    public ApplicationLoader() {
+        super();
     }
 
     @Override
     public void onCreate() {
-        super.onCreate();
+        applicationLoaderInstance = this;
+        try {
+            applicationContext = getApplicationContext();
+        } catch (Throwable ignore) {
 
-        if (Build.VERSION.SDK_INT < 11) {
-            java.lang.System.setProperty("java.net.preferIPv4Stack", "true");
-            java.lang.System.setProperty("java.net.preferIPv6Addresses", "false");
         }
 
-        applicationContext = getApplicationContext();
+        super.onCreate();
+
+        // AndroidUtilities must be initialized before FileLog
+        final String helloWorld = AndroidUtilities.getHelloWorld();
+
+        if (BuildVars.LOGS_ENABLED) {
+            FileLog.d(helloWorld);
+            FileLog.d("app start time = " + (startTime = SystemClock.elapsedRealtime()));
+            try {
+                final PackageInfo info = ApplicationLoader.applicationContext.getPackageManager().getPackageInfo(ApplicationLoader.applicationContext.getPackageName(), 0);
+                final String abi;
+                switch (info.versionCode % 10) {
+                    case 1:
+                    case 2:
+                        abi = "store bundled " + Build.CPU_ABI + " " + Build.CPU_ABI2;
+                        break;
+                    default:
+                    case 9:
+                        if (ApplicationLoader.isStandaloneBuild()) {
+                            abi = "direct " + Build.CPU_ABI + " " + Build.CPU_ABI2;
+                        } else {
+                            abi = "universal " + Build.CPU_ABI + " " + Build.CPU_ABI2;
+                        }
+                        break;
+                }
+                FileLog.d("buildVersion = " + String.format(Locale.US, "v%s (%d[%d]) %s", info.versionName, info.versionCode / 10, info.versionCode % 10, abi));
+            } catch (Exception e) {
+                FileLog.e(e);
+            }
+            FileLog.d("device = manufacturer=" + Build.MANUFACTURER + ", device=" + Build.DEVICE + ", model=" + Build.MODEL + ", product=" + Build.PRODUCT);
+        }
+        if (applicationContext == null) {
+            applicationContext = getApplicationContext();
+        }
+
         NativeLoader.initNativeLibs(ApplicationLoader.applicationContext);
 
-        if (Build.VERSION.SDK_INT >= 14) {
-            new ForegroundDetector(this);
+        try {
+            ConnectionsManager.native_setJava(false);
+        } catch (UnsatisfiedLinkError error) {
+            throw new RuntimeException("can't load native libraries " +  Build.CPU_ABI + " lookup folder " + NativeLoader.getAbiFolder());
+        }
+        new ForegroundDetector(this) {
+            @Override
+            public void onActivityStarted(Activity activity) {
+                boolean wasInBackground = isBackground();
+                super.onActivityStarted(activity);
+                if (wasInBackground) {
+                    ensureCurrentNetworkGet(true);
+                }
+            }
+        };
+        if (BuildConfig.DEBUG_VERSION) {
+            new ANRDetector(FileLog::dumpANR);
+        }
+
+        if (BuildVars.LOGS_ENABLED) {
+            FileLog.d("load libs time = " + (SystemClock.elapsedRealtime() - startTime));
         }
 
         applicationHandler = new Handler(applicationContext.getMainLooper());
 
-        startPushService();
+        AndroidUtilities.runOnUIThread(ApplicationLoader::startPushService);
+
+        LauncherIconController.tryFixLauncherIconIfNeeded();
+        ProxyRotationController.init();
+
+        //if (BuildConfig.DEBUG_PRIVATE_VERSION) {
+        //    Choreographer60FpsContent.getInstance().addFrameCallback(debugEverySecondChecks, 1);
+        //}
     }
+
+    private final Runnable debugEverySecondChecks = () -> AndroidUtilities.runOnUIThread(() -> {
+        NotificationCenter.sanitize();
+    });
 
     public static void startPushService() {
-        SharedPreferences preferences = applicationContext.getSharedPreferences("Notifications", MODE_PRIVATE);
+        SharedPreferences preferences = MessagesController.getGlobalNotificationsSettings();
+        boolean enabled;
+        if (preferences.contains("pushService")) {
+            enabled = preferences.getBoolean("pushService", true);
+        } else {
+            enabled = MessagesController.getMainSettings(UserConfig.selectedAccount).getBoolean("keepAliveService", false);
+        }
+        if (enabled) {
+            try {
+                applicationContext.startService(new Intent(applicationContext, NotificationsService.class));
+            } catch (Throwable ignore) {
 
-        if (preferences.getBoolean("pushService", true)) {
-            applicationContext.startService(new Intent(applicationContext, NotificationsService.class));
-
-            if (android.os.Build.VERSION.SDK_INT >= 19) {
-//                Calendar cal = Calendar.getInstance();
-//                PendingIntent pintent = PendingIntent.getService(applicationContext, 0, new Intent(applicationContext, NotificationsService.class), 0);
-//                AlarmManager alarm = (AlarmManager) applicationContext.getSystemService(Context.ALARM_SERVICE);
-//                alarm.setRepeating(AlarmManager.RTC_WAKEUP, cal.getTimeInMillis(), 30000, pintent);
-
-                PendingIntent pintent = PendingIntent.getService(applicationContext, 0, new Intent(applicationContext, NotificationsService.class), 0);
-                AlarmManager alarm = (AlarmManager)applicationContext.getSystemService(Context.ALARM_SERVICE);
-                alarm.cancel(pintent);
             }
         } else {
-            stopPushService();
+            applicationContext.stopService(new Intent(applicationContext, NotificationsService.class));
         }
-    }
-
-    public static void stopPushService() {
-        applicationContext.stopService(new Intent(applicationContext, NotificationsService.class));
-
-        PendingIntent pintent = PendingIntent.getService(applicationContext, 0, new Intent(applicationContext, NotificationsService.class), 0);
-        AlarmManager alarm = (AlarmManager)applicationContext.getSystemService(Context.ALARM_SERVICE);
-        alarm.cancel(pintent);
     }
 
     @Override
@@ -230,135 +388,337 @@ public class ApplicationLoader extends Application {
         super.onConfigurationChanged(newConfig);
         try {
             LocaleController.getInstance().onDeviceConfigurationChange(newConfig);
-            AndroidUtilities.checkDisplaySize();
+            AndroidUtilities.checkDisplaySize(applicationContext, newConfig);
+            VideoCapturerDevice.checkScreenCapturerSize();
+            AndroidUtilities.resetTabletFlag();
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
-    private void initPlayServices() {
-        if (checkPlayServices()) {
-            gcm = GoogleCloudMessaging.getInstance(this);
-            regid = getRegistrationId();
-
-            if (regid.length() == 0) {
-                registerInBackground();
+    private void initPushServices() {
+        AndroidUtilities.runOnUIThread(() -> {
+            if (getPushProvider().hasServices()) {
+                getPushProvider().onRequestPushToken();
             } else {
-                sendRegistrationIdToBackend(false);
+                if (BuildVars.LOGS_ENABLED) {
+                    FileLog.d("No valid " + getPushProvider().getLogTitle() + " APK found.");
+                }
+                SharedConfig.pushStringStatus = "__NO_GOOGLE_PLAY_SERVICES__";
+                PushListenerController.sendRegistrationToServer(getPushProvider().getPushType(), null);
             }
-        } else {
-            FileLog.d("tmessages", "No valid Google Play Services APK found.");
-        }
+        }, 1000);
     }
 
     private boolean checkPlayServices() {
-        int resultCode = GooglePlayServicesUtil.isGooglePlayServicesAvailable(this);
-        return resultCode == ConnectionResult.SUCCESS;
-        /*if (resultCode != ConnectionResult.SUCCESS) {
-            if (GooglePlayServicesUtil.isUserRecoverableError(resultCode)) {
-                GooglePlayServicesUtil.getErrorDialog(resultCode, this, PLAY_SERVICES_RESOLUTION_REQUEST).show();
-            } else {
-                Log.i("tmessages", "This device is not supported.");
-            }
-            return false;
-        }
-        return true;*/
-    }
-
-    private String getRegistrationId() {
-        final SharedPreferences prefs = getGCMPreferences(applicationContext);
-        String registrationId = prefs.getString(PROPERTY_REG_ID, "");
-        if (registrationId.length() == 0) {
-            FileLog.d("tmessages", "Registration not found.");
-            return "";
-        }
-        int registeredVersion = prefs.getInt(PROPERTY_APP_VERSION, Integer.MIN_VALUE);
-        int currentVersion = getAppVersion();
-        if (registeredVersion != currentVersion) {
-            FileLog.d("tmessages", "App version changed.");
-            return "";
-        }
-        return registrationId;
-    }
-
-    private SharedPreferences getGCMPreferences(Context context) {
-        return getSharedPreferences(ApplicationLoader.class.getSimpleName(), Context.MODE_PRIVATE);
-    }
-
-    public static int getAppVersion() {
         try {
-            PackageInfo packageInfo = applicationContext.getPackageManager().getPackageInfo(applicationContext.getPackageName(), 0);
-            return packageInfo.versionCode;
-        } catch (PackageManager.NameNotFoundException e) {
-            throw new RuntimeException("Could not get package name: " + e);
+            int resultCode = GooglePlayServicesUtil.isGooglePlayServicesAvailable(this);
+            return resultCode == ConnectionResult.SUCCESS;
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
+        return true;
+    }
+
+    private static long lastNetworkCheck = -1;
+    private static void ensureCurrentNetworkGet() {
+        final long now = System.currentTimeMillis();
+        ensureCurrentNetworkGet(now - lastNetworkCheck > 5000);
+        lastNetworkCheck = now;
+    }
+
+    private static void ensureCurrentNetworkGet(boolean force) {
+        if (force || currentNetworkInfo == null) {
+            try {
+                if (connectivityManager == null) {
+                    connectivityManager = (ConnectivityManager) ApplicationLoader.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE);
+                }
+                currentNetworkInfo = connectivityManager.getActiveNetworkInfo();
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    if (networkCallback == null) {
+                        networkCallback = new ConnectivityManager.NetworkCallback() {
+                            @Override
+                            public void onAvailable(@NonNull Network network) {
+                                lastKnownNetworkType = -1;
+                            }
+
+                            @Override
+                            public void onCapabilitiesChanged(@NonNull Network network, @NonNull NetworkCapabilities networkCapabilities) {
+                                lastKnownNetworkType = -1;
+                            }
+                        };
+                        connectivityManager.registerDefaultNetworkCallback(networkCallback);
+                    }
+                }
+            } catch (Throwable ignore) {
+
+            }
         }
     }
 
-    private void registerInBackground() {
-        AsyncTask<String, String, Boolean> task = new AsyncTask<String, String, Boolean>() {
-            @Override
-            protected Boolean doInBackground(String... objects) {
-                if (gcm == null) {
-                    gcm = GoogleCloudMessaging.getInstance(applicationContext);
+    public static boolean isRoaming() {
+        try {
+            ensureCurrentNetworkGet(false);
+            return currentNetworkInfo != null && currentNetworkInfo.isRoaming();
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
+        return false;
+    }
+
+    public static boolean isConnectedOrConnectingToWiFi() {
+        try {
+            ensureCurrentNetworkGet(false);
+            if (currentNetworkInfo != null && (currentNetworkInfo.getType() == ConnectivityManager.TYPE_WIFI || currentNetworkInfo.getType() == ConnectivityManager.TYPE_ETHERNET)) {
+                NetworkInfo.State state = currentNetworkInfo.getState();
+                if (state == NetworkInfo.State.CONNECTED || state == NetworkInfo.State.CONNECTING || state == NetworkInfo.State.SUSPENDED) {
+                    return true;
                 }
-                int count = 0;
-                while (count < 1000) {
-                    try {
-                        count++;
-                        regid = gcm.register(BuildVars.GCM_SENDER_ID);
-                        sendRegistrationIdToBackend(true);
-                        storeRegistrationId(applicationContext, regid);
+            }
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
+        return false;
+    }
+
+    public static boolean isConnectedToWiFi() {
+        try {
+            ensureCurrentNetworkGet(false);
+            if (currentNetworkInfo != null && (currentNetworkInfo.getType() == ConnectivityManager.TYPE_WIFI || currentNetworkInfo.getType() == ConnectivityManager.TYPE_ETHERNET) && currentNetworkInfo.getState() == NetworkInfo.State.CONNECTED) {
+                return true;
+            }
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
+        return false;
+    }
+
+    public static boolean isConnectionSlow() {
+        try {
+            ensureCurrentNetworkGet(false);
+            if (currentNetworkInfo != null && currentNetworkInfo.getType() == ConnectivityManager.TYPE_MOBILE) {
+                switch (currentNetworkInfo.getSubtype()) {
+                    case TelephonyManager.NETWORK_TYPE_1xRTT:
+                    case TelephonyManager.NETWORK_TYPE_CDMA:
+                    case TelephonyManager.NETWORK_TYPE_EDGE:
+                    case TelephonyManager.NETWORK_TYPE_GPRS:
+                    case TelephonyManager.NETWORK_TYPE_IDEN:
                         return true;
-                    } catch (Exception e) {
-                        FileLog.e("tmessages", e);
-                    }
-                    try {
-                        if (count % 20 == 0) {
-                            Thread.sleep(60000 * 30);
-                        } else {
-                            Thread.sleep(5000);
-                        }
-                    } catch (InterruptedException e) {
-                        FileLog.e("tmessages", e);
-                    }
                 }
-                return false;
             }
-        };
+        } catch (Throwable ignore) {
 
-        if (android.os.Build.VERSION.SDK_INT >= 11) {
-            task.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR, null, null, null);
+        }
+        return false;
+    }
+
+    public static int getAutodownloadNetworkType() {
+        try {
+            ensureCurrentNetworkGet(false);
+            if (currentNetworkInfo == null) {
+                return StatsController.TYPE_MOBILE;
+            }
+            if (currentNetworkInfo.getType() == ConnectivityManager.TYPE_WIFI || currentNetworkInfo.getType() == ConnectivityManager.TYPE_ETHERNET) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && (lastKnownNetworkType == StatsController.TYPE_MOBILE || lastKnownNetworkType == StatsController.TYPE_WIFI) && System.currentTimeMillis() - lastNetworkCheckTypeTime < 5000) {
+                    return lastKnownNetworkType;
+                }
+                if (connectivityManager.isActiveNetworkMetered()) {
+                    lastKnownNetworkType = StatsController.TYPE_MOBILE;
+                } else {
+                    lastKnownNetworkType = StatsController.TYPE_WIFI;
+                }
+                lastNetworkCheckTypeTime = System.currentTimeMillis();
+                return lastKnownNetworkType;
+            }
+            if (currentNetworkInfo.isRoaming()) {
+                return StatsController.TYPE_ROAMING;
+            }
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
+        return StatsController.TYPE_MOBILE;
+    }
+
+    public static int getCurrentNetworkType() {
+        if (isConnectedOrConnectingToWiFi()) {
+            return StatsController.TYPE_WIFI;
+        } else if (isRoaming()) {
+            return StatsController.TYPE_ROAMING;
         } else {
-            task.execute(null, null, null);
+            return StatsController.TYPE_MOBILE;
         }
     }
 
-    private void sendRegistrationIdToBackend(final boolean isNew) {
-        Utilities.stageQueue.postRunnable(new Runnable() {
-            @Override
-            public void run() {
-                UserConfig.pushString = regid;
-                UserConfig.registeredForPush = !isNew;
-                UserConfig.saveConfig(false);
-                if (UserConfig.getClientUserId() != 0) {
-                    AndroidUtilities.runOnUIThread(new Runnable() {
-                        @Override
-                        public void run() {
-                            MessagesController.getInstance().registerForPush(regid);
-                        }
-                    });
+    public static boolean isNetworkOnlineFast() {
+        try {
+            ensureCurrentNetworkGet(false);
+            if (currentNetworkInfo == null) {
+                return true;
+            }
+            if (currentNetworkInfo.isConnectedOrConnecting() || currentNetworkInfo.isAvailable()) {
+                return true;
+            }
+
+            NetworkInfo netInfo = connectivityManager.getNetworkInfo(ConnectivityManager.TYPE_MOBILE);
+            if (netInfo != null && netInfo.isConnectedOrConnecting()) {
+                return true;
+            } else {
+                netInfo = connectivityManager.getNetworkInfo(ConnectivityManager.TYPE_WIFI);
+                if (netInfo != null && netInfo.isConnectedOrConnecting()) {
+                    return true;
                 }
             }
-        });
+        } catch (Exception e) {
+            FileLog.e(e);
+            return true;
+        }
+        return false;
     }
 
-    private void storeRegistrationId(Context context, String regId) {
-        final SharedPreferences prefs = getGCMPreferences(context);
-        int appVersion = getAppVersion();
-        FileLog.e("tmessages", "Saving regId on app version " + appVersion);
-        SharedPreferences.Editor editor = prefs.edit();
-        editor.putString(PROPERTY_REG_ID, regId);
-        editor.putInt(PROPERTY_APP_VERSION, appVersion);
-        editor.commit();
+    public static boolean isNetworkOnlineRealtime() {
+        try {
+            ConnectivityManager connectivityManager = (ConnectivityManager) ApplicationLoader.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE);
+            NetworkInfo netInfo = connectivityManager.getActiveNetworkInfo();
+            if (netInfo != null && (netInfo.isConnectedOrConnecting() || netInfo.isAvailable())) {
+                return true;
+            }
+
+            netInfo = connectivityManager.getNetworkInfo(ConnectivityManager.TYPE_MOBILE);
+
+            if (netInfo != null && netInfo.isConnectedOrConnecting()) {
+                return true;
+            } else {
+                netInfo = connectivityManager.getNetworkInfo(ConnectivityManager.TYPE_WIFI);
+                if (netInfo != null && netInfo.isConnectedOrConnecting()) {
+                    return true;
+                }
+            }
+        } catch (Exception e) {
+            FileLog.e(e);
+            return true;
+        }
+        return false;
+    }
+
+    public static boolean isNetworkOnline() {
+        boolean result = isNetworkOnlineRealtime();
+        if (BuildVars.DEBUG_PRIVATE_VERSION) {
+            boolean result2 = isNetworkOnlineFast();
+            if (result != result2) {
+                FileLog.d("network online mismatch");
+            }
+        }
+        return result;
+    }
+
+    public static void startAppCenter(Activity context) {
+        applicationLoaderInstance.startAppCenterInternal(context);
+    }
+
+    public static void checkForUpdates() {
+        applicationLoaderInstance.checkForUpdatesInternal();
+    }
+
+    public static void appCenterLog(Throwable e) {
+        applicationLoaderInstance.appCenterLogInternal(e);
+    }
+
+    protected void appCenterLogInternal(Throwable e) {
+
+    }
+
+    protected void checkForUpdatesInternal() {
+
+    }
+
+    protected void startAppCenterInternal(Activity context) {
+
+    }
+
+    public static void logDualCamera(boolean success, boolean vendor) {
+        applicationLoaderInstance.logDualCameraInternal(success, vendor);
+    }
+
+    protected void logDualCameraInternal(boolean success, boolean vendor) {
+
+    }
+
+    public boolean checkApkInstallPermissions(final Context context) {
+        return false;
+    }
+
+    public boolean openApkInstall(Activity activity, TLRPC.Document document) {
+        return false;
+    }
+
+    public boolean showUpdateAppPopup(Context context, TLRPC.TL_help_appUpdate update, int account) {
+        return false;
+    }
+
+    public boolean showCustomUpdateAppPopup(Context context, BetaUpdate update, int account) {
+        return false;
+    }
+
+    public IUpdateLayout takeUpdateLayout(Activity activity, ViewGroup sideMenuContainer) {
+        return null;
+    }
+
+    public TLRPC.Update parseTLUpdate(int constructor) {
+        return null;
+    }
+
+    public void processUpdate(int currentAccount, TLRPC.Update update) {
+
+    }
+
+    public boolean onSuggestionFill(String suggestion, CharSequence[] output, boolean[] closeable) {
+        return false;
+    }
+
+    public boolean onSuggestionClick(String suggestion) {
+        return false;
+    }
+
+    public void addItemOptions(ItemOptions itemOptions) {
+
+    }
+
+    public boolean checkRequestPermissionResult(int requestCode, String[] permissions, int[] grantResults) {
+        return false;
+    }
+
+    public boolean consumePush(int account, JSONObject json) {
+        return false;
+    }
+
+    public void onResume() {
+
+    }
+
+    public boolean onPause() {
+        return false;
+    }
+
+    public BaseFragment openSettings(int n) {
+        return null;
+    }
+
+    public boolean isCustomUpdate() {
+        return false;
+    }
+    public void downloadUpdate() {}
+    public void cancelDownloadingUpdate() {}
+    public boolean isDownloadingUpdate() {
+        return false;
+    }
+    public float getDownloadingUpdateProgress() {
+        return 0.0f;
+    }
+    public void checkUpdate(boolean force, Runnable whenDone) {}
+    public BetaUpdate getUpdate() {
+        return null;
+    }
+    public File getDownloadedUpdateFile() {
+        return null;
     }
 }

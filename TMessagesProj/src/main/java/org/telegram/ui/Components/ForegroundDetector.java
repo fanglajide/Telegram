@@ -1,9 +1,9 @@
 /*
- * This is the source code of Telegram for Android v. 2.x
+ * This is the source code of Telegram for Android v. 5.x.x
  * It is licensed under GNU GPL v. 2 or later.
  * You should have received a copy of the license in this archive (see LICENSE).
  *
- * Copyright Nikolai Kudashov, 2013-2015.
+ * Copyright Nikolai Kudashov, 2013-2018.
  */
 
 package org.telegram.ui.Components;
@@ -12,9 +12,13 @@ import android.app.Activity;
 import android.app.Application;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.SystemClock;
 
+import org.telegram.messenger.BuildVars;
 import org.telegram.messenger.FileLog;
 
+import java.lang.ref.WeakReference;
+import java.util.ArrayList;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 public class ForegroundDetector implements Application.ActivityLifecycleCallbacks {
@@ -29,9 +33,32 @@ public class ForegroundDetector implements Application.ActivityLifecycleCallback
     private long enterBackgroundTime = 0;
     private CopyOnWriteArrayList<Listener> listeners = new CopyOnWriteArrayList<>();
     private static ForegroundDetector Instance = null;
+    private final ArrayList<WeakReference<Activity>> resumedActivities = new ArrayList<>();
 
     public static ForegroundDetector getInstance() {
         return Instance;
+    }
+
+    /** Call on the UI thread. Includes bubbles and activities outside LaunchActivity. */
+    public Activity getForegroundActivity() {
+        Activity lastResumed = null;
+        for (int i = resumedActivities.size() - 1; i >= 0; --i) {
+            Activity activity = resumedActivities.get(i).get();
+            if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
+                resumedActivities.remove(i);
+            } else {
+                if (activity.hasWindowFocus()) return activity;
+                if (lastResumed == null) lastResumed = activity;
+            }
+        }
+        return lastResumed;
+    }
+
+    private void removeActivity(Activity activity) {
+        for (int i = resumedActivities.size() - 1; i >= 0; --i) {
+            Activity existing = resumedActivities.get(i).get();
+            if (existing == null || existing == activity) resumedActivities.remove(i);
+        }
     }
 
     public ForegroundDetector(Application application) {
@@ -58,22 +85,24 @@ public class ForegroundDetector implements Application.ActivityLifecycleCallback
     @Override
     public void onActivityStarted(Activity activity) {
         if (++refs == 1) {
-            if (System.currentTimeMillis() - enterBackgroundTime < 200) {
+            if (SystemClock.elapsedRealtime() - enterBackgroundTime < 200) {
                 wasInBackground = false;
             }
-            FileLog.e("tmessages", "switch to foreground");
+            if (BuildVars.LOGS_ENABLED) {
+                FileLog.d("switch to foreground");
+            }
             for (Listener listener : listeners) {
                 try {
                     listener.onBecameForeground();
                 } catch (Exception e) {
-                    FileLog.e("tmessages", e);
+                    FileLog.e(e);
                 }
             }
         }
     }
 
     public boolean isWasInBackground(boolean reset) {
-        if (reset && Build.VERSION.SDK_INT >= 21 && (System.currentTimeMillis() - enterBackgroundTime < 200)) {
+        if (reset && Build.VERSION.SDK_INT >= 21 && (SystemClock.elapsedRealtime() - enterBackgroundTime < 200)) {
             wasInBackground = false;
         }
         return wasInBackground;
@@ -86,14 +115,16 @@ public class ForegroundDetector implements Application.ActivityLifecycleCallback
     @Override
     public void onActivityStopped(Activity activity) {
         if (--refs == 0) {
-            enterBackgroundTime = System.currentTimeMillis();
+            enterBackgroundTime = SystemClock.elapsedRealtime();
             wasInBackground = true;
-            FileLog.e("tmessages", "switch to background");
+            if (BuildVars.LOGS_ENABLED) {
+                FileLog.d("switch to background");
+            }
             for (Listener listener : listeners) {
                 try {
                     listener.onBecameBackground();
                 } catch (Exception e) {
-                    FileLog.e("tmessages", e);
+                    FileLog.e(e);
                 }
             }
         }
@@ -105,10 +136,13 @@ public class ForegroundDetector implements Application.ActivityLifecycleCallback
 
     @Override
     public void onActivityResumed(Activity activity) {
+        removeActivity(activity);
+        resumedActivities.add(new WeakReference<>(activity));
     }
 
     @Override
     public void onActivityPaused(Activity activity) {
+        removeActivity(activity);
     }
 
     @Override
@@ -117,5 +151,6 @@ public class ForegroundDetector implements Application.ActivityLifecycleCallback
 
     @Override
     public void onActivityDestroyed(Activity activity) {
+        removeActivity(activity);
     }
 }

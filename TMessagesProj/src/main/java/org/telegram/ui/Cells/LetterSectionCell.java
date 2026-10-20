@@ -1,12 +1,14 @@
 /*
- * This is the source code of Telegram for Android v. 1.7.x.
+ * This is the source code of Telegram for Android v. 5.x.x.
  * It is licensed under GNU GPL v. 2 or later.
  * You should have received a copy of the license in this archive (see LICENSE).
  *
- * Copyright Nikolai Kudashov, 2013-2014.
+ * Copyright Nikolai Kudashov, 2013-2018.
  */
 
 package org.telegram.ui.Cells;
+
+import static org.telegram.messenger.AndroidUtilities.dp;
 
 import android.content.Context;
 import android.util.TypedValue;
@@ -15,7 +17,9 @@ import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 
-import org.telegram.android.AndroidUtilities;
+import org.telegram.messenger.AndroidUtilities;
+import org.telegram.ui.ActionBar.Theme;
+import org.telegram.ui.Components.LayoutHelper;
 
 public class LetterSectionCell extends FrameLayout {
 
@@ -23,18 +27,14 @@ public class LetterSectionCell extends FrameLayout {
 
     public LetterSectionCell(Context context) {
         super(context);
-        setLayoutParams(new ViewGroup.LayoutParams(AndroidUtilities.dp(54), AndroidUtilities.dp(64)));
+        setLayoutParams(new ViewGroup.LayoutParams(dp(12 + 64), dp(64)));
 
         textView = new TextView(getContext());
         textView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 22);
-        textView.setTypeface(AndroidUtilities.getTypeface("fonts/rmedium.ttf"));
-        textView.setTextColor(0xff808080);
+        textView.setTypeface(AndroidUtilities.bold());
+        textView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
         textView.setGravity(Gravity.CENTER);
-        addView(textView);
-        FrameLayout.LayoutParams layoutParams = (FrameLayout.LayoutParams)textView.getLayoutParams();
-        layoutParams.width = FrameLayout.LayoutParams.MATCH_PARENT;
-        layoutParams.height = FrameLayout.LayoutParams.MATCH_PARENT;
-        textView.setLayoutParams(layoutParams);
+        addView(textView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT, Gravity.FILL, 12, 0, 0, 0));
     }
 
     public void setLetter(String letter) {
@@ -42,6 +42,6 @@ public class LetterSectionCell extends FrameLayout {
     }
 
     public void setCellHeight(int height) {
-        setLayoutParams(new ViewGroup.LayoutParams(AndroidUtilities.dp(54), height));
+        setLayoutParams(new ViewGroup.LayoutParams(dp(54), height));
     }
 }

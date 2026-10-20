@@ -22,31 +22,36 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Paint.Align;
-import android.graphics.drawable.Drawable;
+import android.os.Build;
 import android.text.TextUtils;
-import android.util.AttributeSet;
 import android.util.SparseArray;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
+import android.view.accessibility.AccessibilityEvent;
+import android.view.accessibility.AccessibilityManager;
 import android.view.animation.DecelerateInterpolator;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
-import org.telegram.messenger.R;
+import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.Utilities;
+import org.telegram.ui.ActionBar.Theme;
 
 import java.util.Locale;
 
 public class NumberPicker extends LinearLayout {
 
-    private static final int SELECTOR_WHEEL_ITEM_COUNT = 3;
+    public static final int DEFAULT_SIZE_PER_COUNT = 42;
+    private int SELECTOR_WHEEL_ITEM_COUNT = 3;
     private static final long DEFAULT_LONG_PRESS_UPDATE_INTERVAL = 300;
-    private static final int SELECTOR_MIDDLE_ITEM_INDEX = SELECTOR_WHEEL_ITEM_COUNT / 2;
+    private int SELECTOR_MIDDLE_ITEM_INDEX = SELECTOR_WHEEL_ITEM_COUNT / 2;
     private static final int SELECTOR_MAX_FLING_VELOCITY_ADJUSTMENT = 8;
     private static final int SELECTOR_ADJUSTMENT_DURATION_MILLIS = 800;
     private static final int SNAP_SCROLL_DURATION = 300;
@@ -56,6 +61,7 @@ public class NumberPicker extends LinearLayout {
     private static final int DEFAULT_LAYOUT_RESOURCE_ID = 0;
     private static final int SIZE_UNSPECIFIED = -1;
 
+    private int textOffset;
     private TextView mInputText;
     private int mSelectionDividersDistance;
     private int mMinHeight;
@@ -67,16 +73,18 @@ public class NumberPicker extends LinearLayout {
     private int mSelectorTextGapHeight;
     private String[] mDisplayedValues;
     private int mMinValue;
+    private boolean mMinValueSet;
     private int mMaxValue;
+    private boolean mMaxValueSet;
     private int mValue;
+    private int mFantomValue;
     private OnValueChangeListener mOnValueChangeListener;
     private OnScrollListener mOnScrollListener;
     private Formatter mFormatter;
     private long mLongPressUpdateInterval = DEFAULT_LONG_PRESS_UPDATE_INTERVAL;
     private final SparseArray<String> mSelectorIndexToStringCache = new SparseArray<>();
-    private final int[] mSelectorIndices = new int[SELECTOR_WHEEL_ITEM_COUNT];
+    private int[] mSelectorIndices = new int[SELECTOR_WHEEL_ITEM_COUNT];
     private Paint mSelectorWheelPaint;
-    private Drawable mVirtualButtonPressedDrawable;
     private int mSelectorElementHeight;
     private int mInitialScrollOffset = Integer.MIN_VALUE;
     private int mCurrentScrollOffset;
@@ -91,9 +99,9 @@ public class NumberPicker extends LinearLayout {
     private int mTouchSlop;
     private int mMinimumFlingVelocity;
     private int mMaximumFlingVelocity;
-    private boolean mWrapSelectorWheel;
+    private boolean mWrapSelectorWheel, mWrapSelectorWheelSetting;
     private int mSolidColor;
-    private Drawable mSelectionDivider;
+    private Paint mSelectionDivider;
     private int mSelectionDividerHeight;
     private int mScrollState = OnScrollListener.SCROLL_STATE_IDLE;
     private boolean mIngonreMoveEvents;
@@ -104,6 +112,10 @@ public class NumberPicker extends LinearLayout {
     private boolean mDecrementVirtualButtonPressed;
     private PressedStateHelper mPressedStateHelper;
     private int mLastHandledDownDpadKeyCode = -1;
+    private SeekBarAccessibilityDelegate accessibilityDelegate;
+    private final Theme.ResourcesProvider resourcesProvider;
+
+    private boolean drawDividers = true;
 
     public interface OnValueChangeListener {
         void onValueChange(NumberPicker picker, int oldVal, int newVal);
@@ -121,9 +133,24 @@ public class NumberPicker extends LinearLayout {
         String format(int value);
     }
 
+    public void setItemCount(int count) {
+        if (SELECTOR_WHEEL_ITEM_COUNT == count) {
+            return;
+        }
+        SELECTOR_WHEEL_ITEM_COUNT = count;
+        SELECTOR_MIDDLE_ITEM_INDEX = SELECTOR_WHEEL_ITEM_COUNT / 2;
+        mSelectorIndices = new int[SELECTOR_WHEEL_ITEM_COUNT];
+        initializeSelectorWheelIndices();
+    }
+
+    public int getItemsCount() {
+        return SELECTOR_WHEEL_ITEM_COUNT;
+    }
+
     private void init() {
         mSolidColor = 0;
-        mSelectionDivider = getResources().getDrawable(R.drawable.numberpicker_selection_divider);
+        mSelectionDivider = new Paint();
+        mSelectionDivider.setColor(getThemedColor(Theme.key_featuredStickers_addButton));
 
         mSelectionDividerHeight = (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, UNSCALED_DEFAULT_SELECTION_DIVIDER_HEIGHT, getResources().getDisplayMetrics());
         mSelectionDividersDistance = (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, UNSCALED_DEFAULT_SELECTION_DIVIDERS_DISTANCE, getResources().getDisplayMetrics());
@@ -144,25 +171,23 @@ public class NumberPicker extends LinearLayout {
 
         mComputeMaxWidth = (mMaxWidth == SIZE_UNSPECIFIED);
 
-        mVirtualButtonPressedDrawable = getResources().getDrawable(R.drawable.item_background_holo_light);
-
         mPressedStateHelper = new PressedStateHelper();
 
         setWillNotDraw(false);
 
         mInputText = new TextView(getContext());
-        addView(mInputText);
-        mInputText.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         mInputText.setGravity(Gravity.CENTER);
         mInputText.setSingleLine(true);
+        mInputText.setTextColor(getThemedColor(Theme.key_dialogTextBlack));
         mInputText.setBackgroundResource(0);
-        mInputText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        mInputText.setTextSize(TypedValue.COMPLEX_UNIT_PX, mTextSize);
+        mInputText.setVisibility(INVISIBLE);
+        addView(mInputText, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         ViewConfiguration configuration = ViewConfiguration.get(getContext());
         mTouchSlop = configuration.getScaledTouchSlop();
         mMinimumFlingVelocity = configuration.getScaledMinimumFlingVelocity();
         mMaximumFlingVelocity = configuration.getScaledMaximumFlingVelocity() / SELECTOR_MAX_FLING_VELOCITY_ADJUSTMENT;
-        mTextSize = (int) mInputText.getTextSize();
 
         Paint paint = new Paint();
         paint.setAntiAlias(true);
@@ -178,20 +203,69 @@ public class NumberPicker extends LinearLayout {
         mAdjustScroller = new Scroller(getContext(), new DecelerateInterpolator(2.5f));
 
         updateInputTextView();
+
+        setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
+        setAccessibilityDelegate(accessibilityDelegate = new SeekBarAccessibilityDelegate() {
+            @Override
+            protected void doScroll(View host, boolean backward) {
+                changeValueByOne(!backward);
+            }
+
+            @Override
+            protected boolean canScrollBackward(View host) {
+                return true;
+            }
+
+            @Override
+            protected boolean canScrollForward(View host) {
+                return true;
+            }
+
+            @Override
+            public CharSequence getContentDescription(View host) {
+                if (contentDescriptionCallback != null) {
+                    return contentDescriptionCallback.run(mValue);
+                }
+                return NumberPicker.this.getContentDescription(mValue);
+            }
+        });
+    }
+
+    private Utilities.CallbackReturn<Integer, CharSequence> contentDescriptionCallback;
+
+    public void setContentDescriptionCallback(Utilities.CallbackReturn<Integer, CharSequence> contentDescriptionCallback) {
+        this.contentDescriptionCallback = contentDescriptionCallback;
+    }
+
+    protected CharSequence getContentDescription(int value) {
+        return mInputText.getText();
+    }
+
+    public void setTextColor(int color) {
+        mInputText.setTextColor(color);
+        mSelectorWheelPaint.setColor(color);
+    }
+
+    public void setSelectorColor(int color) {
+        mSelectionDivider.setColor(color);
     }
 
     public NumberPicker(Context context) {
+        this(context, null);
+    }
+
+    public NumberPicker(Context context, Theme.ResourcesProvider resourcesProvider) {
+        this(context, 18, resourcesProvider);
+    }
+
+    public NumberPicker(Context context, int textSize) {
+        this(context, textSize, null);
+    }
+
+    public NumberPicker(Context context, int textSize, Theme.ResourcesProvider resourcesProvider) {
         super(context);
-        init();
-    }
-
-    public NumberPicker(Context context, AttributeSet attrs) {
-        super(context, attrs);
-        init();
-    }
-
-    public NumberPicker(Context context, AttributeSet attrs, int defStyle) {
-        super(context, attrs, defStyle);
+        this.resourcesProvider = resourcesProvider;
+        mTextSize = AndroidUtilities.dp(textSize);
         init();
     }
 
@@ -211,8 +285,8 @@ public class NumberPicker extends LinearLayout {
         if (changed) {
             initializeSelectorWheel();
             initializeFadingEdges();
-            mTopSelectionDividerTop = (getHeight() - mSelectionDividersDistance) / 2 - mSelectionDividerHeight;
-            mBottomSelectionDividerBottom = mTopSelectionDividerTop + 2 * mSelectionDividerHeight + mSelectionDividersDistance;
+            mTopSelectionDividerTop = (getHeight() - mTextSize - mSelectorTextGapHeight) / 2;
+            mBottomSelectionDividerBottom = (getHeight() + mTextSize + mSelectorTextGapHeight) / 2;
         }
     }
 
@@ -252,39 +326,46 @@ public class NumberPicker extends LinearLayout {
             return false;
         }
         final int action = event.getActionMasked();
-        switch (action) {
-            case MotionEvent.ACTION_DOWN: {
-                removeAllCallbacks();
-                mInputText.setVisibility(View.INVISIBLE);
-                mLastDownOrMoveEventY = mLastDownEventY = event.getY();
-                mLastDownEventTime = event.getEventTime();
-                mIngonreMoveEvents = false;
-                if (mLastDownEventY < mTopSelectionDividerTop) {
-                    if (mScrollState == OnScrollListener.SCROLL_STATE_IDLE) {
-                        mPressedStateHelper.buttonPressDelayed(PressedStateHelper.BUTTON_DECREMENT);
-                    }
-                } else if (mLastDownEventY > mBottomSelectionDividerBottom) {
-                    if (mScrollState == OnScrollListener.SCROLL_STATE_IDLE) {
-                        mPressedStateHelper.buttonPressDelayed(PressedStateHelper.BUTTON_INCREMENT);
-                    }
+        if (action == MotionEvent.ACTION_DOWN) {
+            removeAllCallbacks();
+            mInputText.setVisibility(View.INVISIBLE);
+            mLastDownOrMoveEventY = mLastDownEventY = event.getY();
+            mLastDownEventTime = event.getEventTime();
+            mIngonreMoveEvents = false;
+            if (mLastDownEventY < mTopSelectionDividerTop) {
+                if (mScrollState == OnScrollListener.SCROLL_STATE_IDLE) {
+                    mPressedStateHelper.buttonPressDelayed(PressedStateHelper.BUTTON_DECREMENT);
                 }
-                getParent().requestDisallowInterceptTouchEvent(true);
-                if (!mFlingScroller.isFinished()) {
-                    mFlingScroller.forceFinished(true);
-                    mAdjustScroller.forceFinished(true);
-                    onScrollStateChange(OnScrollListener.SCROLL_STATE_IDLE);
-                } else if (!mAdjustScroller.isFinished()) {
-                    mFlingScroller.forceFinished(true);
-                    mAdjustScroller.forceFinished(true);
-                } else if (mLastDownEventY < mTopSelectionDividerTop) {
-                    postChangeCurrentByOneFromLongPress(false, ViewConfiguration.getLongPressTimeout());
-                } else if (mLastDownEventY > mBottomSelectionDividerBottom) {
-                    postChangeCurrentByOneFromLongPress(true, ViewConfiguration.getLongPressTimeout());
+            } else if (mLastDownEventY > mBottomSelectionDividerBottom) {
+                if (mScrollState == OnScrollListener.SCROLL_STATE_IDLE) {
+                    mPressedStateHelper.buttonPressDelayed(PressedStateHelper.BUTTON_INCREMENT);
                 }
-                return true;
             }
+            getParent().requestDisallowInterceptTouchEvent(true);
+            if (!mFlingScroller.isFinished()) {
+                mFlingScroller.forceFinished(true);
+                mAdjustScroller.forceFinished(true);
+                onScrollStateChange(OnScrollListener.SCROLL_STATE_IDLE);
+            } else if (!mAdjustScroller.isFinished()) {
+                mFlingScroller.forceFinished(true);
+                mAdjustScroller.forceFinished(true);
+            } else if (mLastDownEventY < mTopSelectionDividerTop) {
+                postChangeCurrentByOneFromLongPress(false, ViewConfiguration.getLongPressTimeout());
+            } else if (mLastDownEventY > mBottomSelectionDividerBottom) {
+                postChangeCurrentByOneFromLongPress(true, ViewConfiguration.getLongPressTimeout());
+            }
+            return true;
         }
         return false;
+    }
+
+    public void finishScroll() {
+        if (!mFlingScroller.isFinished() || !mAdjustScroller.isFinished()) {
+            mFlingScroller.forceFinished(true);
+            mAdjustScroller.forceFinished(true);
+            mCurrentScrollOffset = mInitialScrollOffset;
+            invalidate();
+        }
     }
 
     @Override
@@ -444,11 +525,11 @@ public class NumberPicker extends LinearLayout {
     @Override
     public void scrollBy(int x, int y) {
         int[] selectorIndices = mSelectorIndices;
-        if (!mWrapSelectorWheel && y > 0 && selectorIndices[SELECTOR_MIDDLE_ITEM_INDEX] <= mMinValue) {
+        if (!mWrapSelectorWheel && y > 0 && selectorIndices[SELECTOR_MIDDLE_ITEM_INDEX] <= mMinValue && mCurrentScrollOffset + y > mInitialScrollOffset) {
             mCurrentScrollOffset = mInitialScrollOffset;
             return;
         }
-        if (!mWrapSelectorWheel && y < 0 && selectorIndices[SELECTOR_MIDDLE_ITEM_INDEX] >= mMaxValue) {
+        if (!mWrapSelectorWheel && y < 0 && selectorIndices[SELECTOR_MIDDLE_ITEM_INDEX] >= mMaxValue && mCurrentScrollOffset + y < mInitialScrollOffset) {
             mCurrentScrollOffset = mInitialScrollOffset;
             return;
         }
@@ -456,19 +537,18 @@ public class NumberPicker extends LinearLayout {
         while (mCurrentScrollOffset - mInitialScrollOffset > mSelectorTextGapHeight) {
             mCurrentScrollOffset -= mSelectorElementHeight;
             decrementSelectorIndices(selectorIndices);
-            setValueInternal(selectorIndices[SELECTOR_MIDDLE_ITEM_INDEX], true);
-            if (!mWrapSelectorWheel && selectorIndices[SELECTOR_MIDDLE_ITEM_INDEX] <= mMinValue) {
+            if (!mWrapSelectorWheel && selectorIndices[SELECTOR_MIDDLE_ITEM_INDEX] <= mMinValue && mCurrentScrollOffset > mInitialScrollOffset) {
                 mCurrentScrollOffset = mInitialScrollOffset;
             }
         }
         while (mCurrentScrollOffset - mInitialScrollOffset < -mSelectorTextGapHeight) {
             mCurrentScrollOffset += mSelectorElementHeight;
             incrementSelectorIndices(selectorIndices);
-            setValueInternal(selectorIndices[SELECTOR_MIDDLE_ITEM_INDEX], true);
-            if (!mWrapSelectorWheel && selectorIndices[SELECTOR_MIDDLE_ITEM_INDEX] >= mMaxValue) {
+            if (!mWrapSelectorWheel && selectorIndices[SELECTOR_MIDDLE_ITEM_INDEX] >= mMaxValue && mCurrentScrollOffset < mInitialScrollOffset) {
                 mCurrentScrollOffset = mInitialScrollOffset;
             }
         }
+        setValueInternal(selectorIndices[SELECTOR_MIDDLE_ITEM_INDEX], true);
     }
 
     @Override
@@ -512,6 +592,11 @@ public class NumberPicker extends LinearLayout {
         setValueInternal(value, false);
     }
 
+    public void setTextOffset(int value) {
+        textOffset = value;
+        invalidate();
+    }
+
     private void tryComputeMaxWidth() {
         if (!mComputeMaxWidth) {
             return;
@@ -533,7 +618,6 @@ public class NumberPicker extends LinearLayout {
             }
             maxTextWidth = (int) (numberOfDigits * maxDigitWidth);
         } else {
-            final int valueCount = mDisplayedValues.length;
             for (String mDisplayedValue : mDisplayedValues) {
                 final float textWidth = mSelectorWheelPaint.measureText(mDisplayedValue);
                 if (textWidth > maxTextWidth) {
@@ -557,10 +641,14 @@ public class NumberPicker extends LinearLayout {
     }
 
     public void setWrapSelectorWheel(boolean wrapSelectorWheel) {
-        final boolean wrappingAllowed = (mMaxValue - mMinValue) >= mSelectorIndices.length;
-        if ((!wrapSelectorWheel || wrappingAllowed) && wrapSelectorWheel != mWrapSelectorWheel) {
-            mWrapSelectorWheel = wrapSelectorWheel;
-        }
+        final boolean wrappingAllowed = !(mMaxValueSet && mMinValueSet) || allItemsCount != null && (mMaxValue - mMinValue + 1) >= allItemsCount;
+        mWrapSelectorWheel = wrappingAllowed && (mWrapSelectorWheelSetting = wrapSelectorWheel);
+    }
+
+    private Integer allItemsCount;
+    public void setAllItemsCount(int allItemsCount) {
+        this.allItemsCount = allItemsCount;
+        setWrapSelectorWheel(mWrapSelectorWheelSetting);
     }
 
     public void setOnLongPressUpdateInterval(long intervalMillis) {
@@ -576,6 +664,7 @@ public class NumberPicker extends LinearLayout {
     }
 
     public void setMinValue(int minValue) {
+        mMinValueSet = true;
         if (mMinValue == minValue) {
             return;
         }
@@ -584,14 +673,20 @@ public class NumberPicker extends LinearLayout {
         }
         mMinValue = minValue;
         if (mMinValue > mValue) {
-            mValue = mMinValue;
+            if (mMinValue <= mFantomValue) {
+                mValue = mFantomValue;
+            } else {
+                mValue = mMinValue;
+            }
         }
-        boolean wrapSelectorWheel = mMaxValue - mMinValue > mSelectorIndices.length;
-        setWrapSelectorWheel(wrapSelectorWheel);
+        setWrapSelectorWheel(mWrapSelectorWheelSetting);
         initializeSelectorWheelIndices();
         updateInputTextView();
         tryComputeMaxWidth();
         invalidate();
+        if (mScrollState == OnScrollListener.SCROLL_STATE_IDLE && mOnScrollListener != null) {
+            mOnScrollListener.onScrollStateChange(this, OnScrollListener.SCROLL_STATE_IDLE);
+        }
     }
 
     public int getMaxValue() {
@@ -599,6 +694,7 @@ public class NumberPicker extends LinearLayout {
     }
 
     public void setMaxValue(int maxValue) {
+        mMaxValueSet = true;
         if (mMaxValue == maxValue) {
             return;
         }
@@ -607,14 +703,20 @@ public class NumberPicker extends LinearLayout {
         }
         mMaxValue = maxValue;
         if (mMaxValue < mValue) {
-            mValue = mMaxValue;
+            if (mMaxValue >= mFantomValue) {
+                mValue = mFantomValue;
+            } else {
+                mValue = mMaxValue;
+            }
         }
-        boolean wrapSelectorWheel = mMaxValue - mMinValue > mSelectorIndices.length;
-        setWrapSelectorWheel(wrapSelectorWheel);
+        setWrapSelectorWheel(mWrapSelectorWheelSetting);
         initializeSelectorWheelIndices();
         updateInputTextView();
         tryComputeMaxWidth();
         invalidate();
+        if (mScrollState == OnScrollListener.SCROLL_STATE_IDLE && mOnScrollListener != null) {
+            mOnScrollListener.onScrollStateChange(this, OnScrollListener.SCROLL_STATE_IDLE);
+        }
     }
 
     public String[] getDisplayedValues() {
@@ -647,23 +749,28 @@ public class NumberPicker extends LinearLayout {
         removeAllCallbacks();
     }
 
+    private int thisGravity;
+    @Override
+    public void setGravity(int gravity) {
+        super.setGravity(thisGravity = gravity);
+    }
+
+    private final static CubicBezierInterpolator interpolator = new CubicBezierInterpolator(0, 0.5f, 0.5f, 1f);
     @Override
     protected void onDraw(Canvas canvas) {
-        float x = (getRight() - getLeft()) / 2;
-        float y = mCurrentScrollOffset;
-
-        if (mVirtualButtonPressedDrawable != null && mScrollState == OnScrollListener.SCROLL_STATE_IDLE) {
-            if (mDecrementVirtualButtonPressed) {
-                mVirtualButtonPressedDrawable.setState(PRESSED_STATE_SET);
-                mVirtualButtonPressedDrawable.setBounds(0, 0, getRight(), mTopSelectionDividerTop);
-                mVirtualButtonPressedDrawable.draw(canvas);
-            }
-            if (mIncrementVirtualButtonPressed) {
-                mVirtualButtonPressedDrawable.setState(PRESSED_STATE_SET);
-                mVirtualButtonPressedDrawable.setBounds(0, mBottomSelectionDividerBottom, getRight(), getBottom());
-                mVirtualButtonPressedDrawable.draw(canvas);
-            }
+        float x;
+        if (thisGravity == Gravity.RIGHT) {
+            mSelectorWheelPaint.setTextAlign(Align.RIGHT);
+            x = getWidth();
+        } else if (thisGravity == Gravity.LEFT) {
+            mSelectorWheelPaint.setTextAlign(Align.LEFT);
+            x = 0;
+        } else {
+            mSelectorWheelPaint.setTextAlign(Align.CENTER);
+            x = getWidth() / 2f;
         }
+        x += textOffset;
+        float y = mCurrentScrollOffset;
 
         // draw the selector wheel
         int[] selectorIndices = mSelectorIndices;
@@ -675,25 +782,53 @@ public class NumberPicker extends LinearLayout {
             // item. Otherwise, if the user starts editing the text via the
             // IME he may see a dimmed version of the old value intermixed
             // with the new one.
-            if (i != SELECTOR_MIDDLE_ITEM_INDEX || mInputText.getVisibility() != VISIBLE) {
-                canvas.drawText(scrollSelectorValue, x, y, mSelectorWheelPaint);
+            if (scrollSelectorValue != null && (i != SELECTOR_MIDDLE_ITEM_INDEX || mInputText.getVisibility() != VISIBLE)) {
+                if (SELECTOR_WHEEL_ITEM_COUNT > 3) {
+                    float p;
+                    float cY = getMeasuredHeight() / 2f;
+                    float r = getMeasuredHeight() * 0.5f;
+                    float localY = y - mSelectorWheelPaint.getTextSize() / 2f;
+                    boolean top = true;
+                    if (localY < cY) {
+                        p = localY / r;
+                    } else {
+                        p = (getMeasuredHeight() - localY) / r;
+                        top = false;
+                    }
+                    p = interpolator.getInterpolation(Utilities.clamp(p, 1f, 0));
+                    float yOffset = (1f - p) * mSelectorWheelPaint.getTextSize();
+                    if (!top) {
+                        yOffset = -yOffset;
+                    }
+                    int oldAlpha = -1;
+
+                    canvas.save();
+                    canvas.translate(0, yOffset);
+                    canvas.scale(0.8f + p * 0.2f, p, x, localY);
+                    if (p < 0.1f) {
+                        oldAlpha = mSelectorWheelPaint.getAlpha();
+                        mSelectorWheelPaint.setAlpha((int) (oldAlpha * p / 0.1f));
+                    }
+                    canvas.drawText(scrollSelectorValue, x, y, mSelectorWheelPaint);
+                    canvas.restore();
+                    if (oldAlpha != -1) {
+                        mSelectorWheelPaint.setAlpha(oldAlpha);
+                    }
+                } else {
+                    canvas.drawText(scrollSelectorValue, x, y, mSelectorWheelPaint);
+                }
             }
             y += mSelectorElementHeight;
         }
 
-        // draw the selection dividers
-        if (mSelectionDivider != null) {
-            // draw the top divider
+        if (drawDividers) {
             int topOfTopDivider = mTopSelectionDividerTop;
             int bottomOfTopDivider = topOfTopDivider + mSelectionDividerHeight;
-            mSelectionDivider.setBounds(0, topOfTopDivider, getRight(), bottomOfTopDivider);
-            mSelectionDivider.draw(canvas);
+            canvas.drawRect(0, topOfTopDivider, getRight(), bottomOfTopDivider, mSelectionDivider);
 
-            // draw the bottom divider
             int bottomOfBottomDivider = mBottomSelectionDividerBottom;
             int topOfBottomDivider = bottomOfBottomDivider - mSelectionDividerHeight;
-            mSelectionDivider.setBounds(0, topOfBottomDivider, getRight(), bottomOfBottomDivider);
-            mSelectionDivider.draw(canvas);
+            canvas.drawRect(0, topOfBottomDivider, getRight(), bottomOfBottomDivider, mSelectionDivider);
         }
     }
 
@@ -772,16 +907,22 @@ public class NumberPicker extends LinearLayout {
             current = Math.min(current, mMaxValue);
         }
         int previous = mValue;
-        mValue = current;
+        mValue = mFantomValue = current;
         updateInputTextView();
+        if (Math.abs(previous - current) > 0.9f) {
+            AndroidUtilities.vibrateCursor(this);
+        }
         if (notifyChange) {
             notifyChange(previous, current);
         }
         initializeSelectorWheelIndices();
         invalidate();
+        if (mScrollState == OnScrollListener.SCROLL_STATE_IDLE && mOnScrollListener != null) {
+            mOnScrollListener.onScrollStateChange(this, OnScrollListener.SCROLL_STATE_IDLE);
+        }
     }
 
-    private void changeValueByOne(boolean increment) {
+    protected void changeValueByOne(boolean increment) {
         mInputText.setVisibility(View.INVISIBLE);
         if (!moveToFinalScrollerPosition(mFlingScroller)) {
             moveToFinalScrollerPosition(mAdjustScroller);
@@ -799,7 +940,7 @@ public class NumberPicker extends LinearLayout {
         initializeSelectorWheelIndices();
         int[] selectorIndices = mSelectorIndices;
         int totalTextHeight = selectorIndices.length * mTextSize;
-        float totalTextGapHeight = (getBottom() - getTop()) - totalTextHeight;
+        float totalTextGapHeight = (getBottom() - getTop() + mTextSize) - totalTextHeight;
         float textGapCount = selectorIndices.length;
         mSelectorTextGapHeight = (int) (totalTextGapHeight / textGapCount + 0.5f);
         mSelectorElementHeight = mTextSize + mSelectorTextGapHeight;
@@ -835,6 +976,16 @@ public class NumberPicker extends LinearLayout {
         if (mOnScrollListener != null) {
             mOnScrollListener.onScrollStateChange(this, scrollState);
         }
+        if (scrollState == OnScrollListener.SCROLL_STATE_IDLE) {
+            AccessibilityManager am = (AccessibilityManager) getContext().getSystemService(Context.ACCESSIBILITY_SERVICE);
+            if (am.isTouchExplorationEnabled()) {
+                String text = (mDisplayedValues == null) ? formatNumber(mValue) : mDisplayedValues[mValue - mMinValue];
+                AccessibilityEvent event = AccessibilityEvent.obtain();
+                event.setEventType(AccessibilityEvent.TYPE_ANNOUNCEMENT);
+                event.getText().add(text);
+                am.sendAccessibilityEvent(event);
+            }
+        }
     }
 
     private void fling(int velocityY) {
@@ -850,9 +1001,9 @@ public class NumberPicker extends LinearLayout {
     }
 
     private int getWrappedSelectorIndex(int selectorIndex) {
-        if (selectorIndex > mMaxValue) {
+        if (mMaxValueSet && selectorIndex > mMaxValue && mMaxValue - mMinValue != 0) {
             return mMinValue + (selectorIndex - mMaxValue) % (mMaxValue - mMinValue) - 1;
-        } else if (selectorIndex < mMinValue) {
+        } else if (mMinValueSet && selectorIndex < mMinValue && mMaxValue - mMinValue != 0) {
             return mMaxValue - (mMinValue - selectorIndex) % (mMaxValue - mMinValue) + 1;
         }
         return selectorIndex;
@@ -1080,5 +1231,14 @@ public class NumberPicker extends LinearLayout {
 
     static private String formatNumberWithLocale(int value) {
         return String.format(Locale.getDefault(), "%d", value);
+    }
+
+    public void setDrawDividers(boolean drawDividers) {
+        this.drawDividers = drawDividers;
+        invalidate();
+    }
+
+    private int getThemedColor(int key) {
+        return Theme.getColor(key, resourcesProvider);
     }
 }

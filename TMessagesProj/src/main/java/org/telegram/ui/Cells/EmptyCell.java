@@ -1,9 +1,9 @@
 /*
- * This is the source code of Telegram for Android v. 1.7.x.
+ * This is the source code of Telegram for Android v. 5.x.x.
  * It is licensed under GNU GPL v. 2 or later.
  * You should have received a copy of the license in this archive (see LICENSE).
  *
- * Copyright Nikolai Kudashov, 2013-2014.
+ * Copyright Nikolai Kudashov, 2013-2018.
  */
 
 package org.telegram.ui.Cells;
@@ -11,11 +11,9 @@ package org.telegram.ui.Cells;
 import android.content.Context;
 import android.widget.FrameLayout;
 
-import org.telegram.android.AndroidUtilities;
-
 public class EmptyCell extends FrameLayout {
 
-    int cellHeight;
+    private int cellHeight;
 
     public EmptyCell(Context context) {
         this(context, 8);
@@ -27,12 +25,14 @@ public class EmptyCell extends FrameLayout {
     }
 
     public void setHeight(int height) {
-        cellHeight = height;
-        requestLayout();
+        if (cellHeight != height) {
+            cellHeight = height;
+            requestLayout();
+        }
     }
 
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-        super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(AndroidUtilities.dp(cellHeight), MeasureSpec.EXACTLY));
+        super.onMeasure(MeasureSpec.makeMeasureSpec(MeasureSpec.getSize(widthMeasureSpec), MeasureSpec.EXACTLY), MeasureSpec.makeMeasureSpec(cellHeight, MeasureSpec.EXACTLY));
     }
 }
